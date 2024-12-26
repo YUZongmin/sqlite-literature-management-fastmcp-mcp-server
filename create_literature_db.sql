@@ -60,3 +60,18 @@ CREATE TABLE IF NOT EXISTS section_progress (
     PRIMARY KEY (literature_id, section_name),
     FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE
 );
+
+-- Create literature_entity_links table for tracking paper-entity relationships
+CREATE TABLE IF NOT EXISTS literature_entity_links (
+    literature_id TEXT,
+    entity_name TEXT,
+    relation_type TEXT CHECK(relation_type IN ('discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques')),
+    context TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (literature_id, entity_name),
+    FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE
+);
+
+-- Create index for efficient entity-based lookups
+CREATE INDEX IF NOT EXISTS idx_entity_links ON literature_entity_links(entity_name);

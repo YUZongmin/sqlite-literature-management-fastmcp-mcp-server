@@ -16,6 +16,9 @@ class LiteratureIdentifier:
         'abstract', 'introduction', 'background', 'methods', 
         'results', 'discussion', 'conclusion', 'appendix'
     }
+    VALID_ENTITY_RELATIONS = {
+        'discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques'
+    }
     
     def __init__(self, id_str: str):
         self.source, self.id = self._parse_id(id_str)
@@ -817,6 +820,216 @@ def backup_database(backup_path: str) -> Dict[str, Any]:
                 
     except (sqlite3.Error, OSError) as e:
         raise ValueError(f"Backup error: {str(e)}")
+
+@mcp.tool()
+def link_paper_to_entity(
+    id_str: str,
+    entity_name: str,
+    relation_type: str,
+    context: Optional[str] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a link between a paper and an entity in the knowledge graph.
+    
+    Args:
+        id_str: Literature ID in format "source:id" 
+        entity_name: Name of the entity to link to
+        relation_type: Type of relationship (discusses, introduces, extends, etc.)
+        context: Optional section/part of paper where entity is discussed
+        notes: Optional notes explaining the relationship
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    # Validate relation type
+    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO literature_entity_links 
+                (literature_id, entity_name, relation_type, context, notes)
+                VALUES (?, ?, ?, ?, ?)
+            """, [lit_id.full_id, entity_name, relation_type, context, notes])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name,
+                "relation_type": relation_type
+            }
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def get_paper_entities(id_str: str) -> Dict[str, Any]:
+    """Get all entities linked to a paper.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        
+    Returns:
+        Dictionary containing the paper's linked entities and their relationships
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT entity_name, relation_type, context, notes, created_at
+                FROM literature_entity_links
+                WHERE literature_id = ?
+                ORDER BY created_at DESC
+            """, [lit_id.full_id])
+            
+            return {
+                "literature_id": lit_id.full_id,
+                "entities": [dict(row) for row in cursor.fetchall()]
+            }
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def get_entity_papers(entity_name: str) -> Dict[str, Any]:
+    """Get all papers linked to an entity.
+    
+    Args:
+        entity_name: Name of the entity
+        
+    Returns:
+        Dictionary containing the entity's linked papers and their relationships
+    """
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT l.literature_id, l.relation_type, l.context, l.notes,
+                       r.status, r.importance, r.source,
+                       l.created_at
+                FROM literature_entity_links l
+                JOIN reading_list r ON l.literature_id = r.literature_id
+                WHERE l.entity_name = ?
+                ORDER BY r.importance DESC, r.last_accessed DESC
+            """, [entity_name])
+            
+            return {
+                "entity": entity_name,
+                "papers": [dict(row) for row in cursor.fetchall()]
+            }
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def update_entity_link(
+    id_str: str,
+    entity_name: str,
+    relation_type: Optional[str] = None,
+    context: Optional[str] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update an existing link between a paper and an entity.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        entity_name: Name of the entity
+        relation_type: Optional new relationship type
+        context: Optional new context
+        notes: Optional new notes
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    # Validate relation type if provided
+    if relation_type and relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Build update query dynamically based on provided fields
+            updates = []
+            params = []
+            
+            if relation_type:
+                updates.append("relation_type = ?")
+                params.append(relation_type)
+            if context is not None:
+                updates.append("context = ?")
+                params.append(context)
+            if notes is not None:
+                updates.append("notes = ?")
+                params.append(notes)
+                
+            if not updates:
+                raise ValueError("No updates provided")
+                
+            params.extend([lit_id.full_id, entity_name])
+            
+            query = f"""
+                UPDATE literature_entity_links 
+                SET {', '.join(updates)}
+                WHERE literature_id = ? AND entity_name = ?
+            """
+            
+            cursor.execute(query, params)
+            if cursor.rowcount == 0:
+                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name
+            }
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def remove_entity_link(
+    id_str: str,
+    entity_name: str
+) -> Dict[str, Any]:
+    """Remove a link between a paper and an entity.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        entity_name: Name of the entity
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                DELETE FROM literature_entity_links
+                WHERE literature_id = ? AND entity_name = ?
+            """, [lit_id.full_id, entity_name])
+            
+            if cursor.rowcount == 0:
+                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name
+            }
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
 
 if __name__ == "__main__":
     # Start the FastMCP server
