@@ -8,8 +8,27 @@ from datetime import datetime
 import re
 
 class LiteratureIdentifier:
-    """Handles flexible paper identifiers for different sources"""
-    VALID_SOURCES = {'semanticscholar', 'arxiv', 'doi', 'custom'}
+    """Handles flexible source identifiers for different sources"""
+    
+    # Expand valid sources to include all supported types
+    VALID_SOURCES = {
+        'semanticscholar', 'arxiv', 'doi',  # Academic papers
+        'webpage', 'blog', 'video', 'book',  # Other sources
+        'custom'  # Fallback
+    }
+    
+    # Add source type mapping for automatic type inference
+    SOURCE_TYPE_MAPPINGS = {
+        'semanticscholar': 'paper',
+        'arxiv': 'paper',
+        'doi': 'paper',
+        'webpage': 'webpage',
+        'blog': 'blog',
+        'video': 'video',
+        'book': 'book',
+        'custom': 'custom'
+    }
+    
     VALID_STATUSES = {'unread', 'reading', 'completed', 'archived'}
     VALID_ENTITY_RELATIONS = {
         'discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques'
@@ -34,6 +53,11 @@ class LiteratureIdentifier:
     def full_id(self) -> str:
         """Return the full identifier in source:id format"""
         return f"{self.source}:{self.id}"
+
+    @property
+    def source_type(self) -> str:
+        """Return the inferred source type based on the source"""
+        return self.SOURCE_TYPE_MAPPINGS[self.source]
     
     @classmethod
     def validate(cls, id_str: str) -> bool:
@@ -83,7 +107,7 @@ def add_literature(
         importance: Literature importance (1-5)
         notes: Initial notes
         tags: List of tags to apply
-        source_type: Type of source ('paper', 'webpage', 'blog', 'video', 'book', 'custom')
+        source_type: Optional override for source type (defaults to inferred type)
         source_url: URL or direct link to the source
     
     Returns:
@@ -91,9 +115,13 @@ def add_literature(
     """
     lit_id = LiteratureIdentifier(id_str)
     
+    # Use inferred source type if not explicitly provided
+    inferred_type = lit_id.source_type
+    final_source_type = source_type if source_type else inferred_type
+    
     # Validate source_type if provided
-    valid_source_types = {'paper', 'webpage', 'blog', 'video', 'book', 'custom'}
-    if source_type and source_type not in valid_source_types:
+    valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
+    if final_source_type not in valid_source_types:
         raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
     
     with SQLiteConnection(DB_PATH) as conn:
@@ -107,7 +135,7 @@ def add_literature(
                 )
                 VALUES (?, ?, ?, ?, ?, ?)
             """, [
-                lit_id.full_id, lit_id.source, source_type, source_url,
+                lit_id.full_id, lit_id.source, final_source_type, source_url,
                 importance, notes
             ])
             
@@ -856,6 +884,311 @@ def bulk_link_entities(
                 "literature_id": lit_id.full_id,
                 "entities_linked": len(entities)
             }
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def update_source_metadata(
+    id_str: str,
+    source_type: Optional[str] = None,
+    source_url: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update source metadata for a literature entry.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        source_type: Optional new source type
+        source_url: Optional new source URL
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    # Validate source_type if provided
+    if source_type:
+        valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
+        if source_type not in valid_source_types:
+            raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
+    
+    # Ensure at least one field is being updated
+    if source_type is None and source_url is None:
+        raise ValueError("At least one of source_type or source_url must be provided")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Build update query dynamically
+            updates = []
+            params = []
+            
+            if source_type:
+                updates.append("source_type = ?")
+                params.append(source_type)
+            if source_url is not None:
+                updates.append("source_url = ?")
+                params.append(source_url)
+                
+            params.append(lit_id.full_id)
+            
+            query = f"""
+                UPDATE reading_list 
+                SET {', '.join(updates)}
+                WHERE literature_id = ?
+            """
+            
+            cursor.execute(query, params)
+            if cursor.rowcount == 0:
+                raise ValueError(f"Literature {lit_id.full_id} not found")
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "updated_fields": {
+                    "source_type": source_type if source_type else "unchanged",
+                    "source_url": source_url if source_url else "unchanged"
+                }
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def bulk_update_source_metadata(
+    updates: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Update source metadata for multiple literature entries in a single transaction.
+    
+    Args:
+        updates: List of update dictionaries, each containing:
+                {
+                    "id_str": str,  # Literature ID in source:id format
+                    "source_type": Optional[str],
+                    "source_url": Optional[str]
+                }
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not updates:
+        raise ValueError("Updates list cannot be empty")
+    
+    # Validate all updates first
+    valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
+    validated_updates = []
+    
+    for i, update in enumerate(updates):
+        if 'id_str' not in update:
+            raise ValueError(f"Update {i} missing required 'id_str' field")
+        
+        lit_id = LiteratureIdentifier(update['id_str'])
+        
+        if 'source_type' in update and update['source_type'] not in valid_source_types:
+            raise ValueError(f"Invalid source_type for {lit_id.full_id}. Valid types: {', '.join(valid_source_types)}")
+            
+        if 'source_type' not in update and 'source_url' not in update:
+            raise ValueError(f"Update for {lit_id.full_id} must include at least source_type or source_url")
+            
+        validated_updates.append({
+            'literature_id': lit_id.full_id,
+            'source_type': update.get('source_type'),
+            'source_url': update.get('source_url')
+        })
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            success_count = 0
+            failed_updates = []
+            
+            for update in validated_updates:
+                try:
+                    updates = []
+                    params = []
+                    
+                    if update['source_type']:
+                        updates.append("source_type = ?")
+                        params.append(update['source_type'])
+                    if update['source_url'] is not None:
+                        updates.append("source_url = ?")
+                        params.append(update['source_url'])
+                        
+                    params.append(update['literature_id'])
+                    
+                    query = f"""
+                        UPDATE reading_list 
+                        SET {', '.join(updates)}
+                        WHERE literature_id = ?
+                    """
+                    
+                    cursor.execute(query, params)
+                    if cursor.rowcount > 0:
+                        success_count += 1
+                    else:
+                        failed_updates.append({
+                            "literature_id": update['literature_id'],
+                            "reason": "Entry not found"
+                        })
+                        
+                except Exception as e:
+                    failed_updates.append({
+                        "literature_id": update['literature_id'],
+                        "reason": str(e)
+                    })
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "total_updates": len(validated_updates),
+                "successful_updates": success_count,
+                "failed_updates": failed_updates
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def bulk_add_literature(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Add multiple literature entries in a single transaction.
+    
+    Args:
+        items: List of dictionaries, each containing:
+              Required:
+                - id_str: Literature ID in format "source:id"
+              Optional:
+                - importance: Rating 1-5
+                - notes: Initial notes
+                - tags: List of strings
+                - source_url: Direct link to source
+                - source_type: Override for inferred type
+    
+    Returns:
+        Dictionary containing the operation results including
+        successes, failures, and skipped duplicates
+    """
+    if not items:
+        raise ValueError("Items list cannot be empty")
+    
+    # Pre-validate all items
+    validated_items = []
+    validation_errors = []
+    
+    for i, item in enumerate(items):
+        try:
+            if 'id_str' not in item:
+                raise ValueError("Missing required 'id_str' field")
+            
+            lit_id = LiteratureIdentifier(item['id_str'])
+            
+            # Validate importance if provided
+            importance = item.get('importance', 3)
+            if not isinstance(importance, int) or not (1 <= importance <= 5):
+                raise ValueError("Importance must be an integer between 1 and 5")
+            
+            # Validate tags if provided
+            tags = item.get('tags', [])
+            if tags and not isinstance(tags, list):
+                raise ValueError("Tags must be a list of strings")
+            
+            # Validate and get source type
+            inferred_type = lit_id.source_type
+            source_type = item.get('source_type', inferred_type)
+            valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
+            if source_type not in valid_source_types:
+                raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
+            
+            validated_items.append({
+                'literature_id': lit_id.full_id,
+                'source': lit_id.source,
+                'source_type': source_type,
+                'source_url': item.get('source_url'),
+                'importance': importance,
+                'notes': item.get('notes'),
+                'tags': tags
+            })
+            
+        except Exception as e:
+            validation_errors.append({
+                'index': i,
+                'id_str': item.get('id_str', 'MISSING'),
+                'error': str(e)
+            })
+    
+    if validation_errors and not validated_items:
+        return {
+            "status": "error",
+            "message": "All items failed validation",
+            "validation_errors": validation_errors
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Track results
+            added_items = []
+            skipped_items = []
+            failed_items = []
+            
+            # Prepare batch insert for reading_list
+            cursor.executemany("""
+                INSERT OR IGNORE INTO reading_list (
+                    literature_id, source, source_type, source_url,
+                    importance, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [
+                (item['literature_id'], item['source'], item['source_type'],
+                 item['source_url'], item['importance'], item['notes'])
+                for item in validated_items
+            ])
+            
+            # Check which items were actually inserted
+            for item in validated_items:
+                cursor.execute("""
+                    SELECT 1 FROM reading_list 
+                    WHERE literature_id = ? AND 
+                          added_date > datetime('now', '-1 minute')
+                """, [item['literature_id']])
+                
+                if cursor.fetchone():
+                    added_items.append(item['literature_id'])
+                    
+                    # Add tags if present
+                    if item['tags']:
+                        cursor.executemany("""
+                            INSERT OR IGNORE INTO tags (literature_id, tag)
+                            VALUES (?, ?)
+                        """, [(item['literature_id'], tag) for tag in item['tags']])
+                else:
+                    cursor.execute("SELECT 1 FROM reading_list WHERE literature_id = ?",
+                                 [item['literature_id']])
+                    if cursor.fetchone():
+                        skipped_items.append(item['literature_id'])
+                    else:
+                        failed_items.append({
+                            'literature_id': item['literature_id'],
+                            'reason': 'Insert failed'
+                        })
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "total_items": len(validated_items),
+                "added_items": len(added_items),
+                "skipped_items": len(skipped_items),
+                "failed_items": len(failed_items),
+                "validation_errors": validation_errors,
+                "details": {
+                    "added": added_items,
+                    "skipped": skipped_items,
+                    "failed": failed_items
+                }
+            }
+            
         except sqlite3.Error as e:
             conn.rollback()
             raise ValueError(f"SQLite error: {str(e)}")
