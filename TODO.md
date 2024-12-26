@@ -1,211 +1,166 @@
-# TODO: Memory Graph Integration for Literature Server
+# TODO: Literature Management System Performance Optimization
 
-This document outlines the plan to extend the literature server with memory graph integration capabilities, enabling seamless connections between research papers and knowledge entities.
+## Phase 1: Index Tuning and Caching
 
-## Phase 1: Foundation - Basic Entity Linking
+### Index Optimization
 
-- [OK] **Schema Enhancement:**
-
+- [ ] Analyze current query patterns in production
+- [ ] Add composite indexes for entity suggestions:
   ```sql
-  -- Single table for tracking paper-entity relationships
-  CREATE TABLE literature_entity_links (
-      literature_id TEXT,
-      entity_name TEXT,
-      relation_type TEXT,
-      context TEXT,              -- Section/part of paper where entity is discussed
-      notes TEXT,                -- Explanation of relationship
-      PRIMARY KEY (literature_id, entity_name),
-      FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE
-  );
-
-  -- Index for efficient entity-based lookups
-  CREATE INDEX idx_entity_links ON literature_entity_links(entity_name);
+  CREATE INDEX idx_entity_links_context ON literature_entity_links(entity_name, context);
+  CREATE INDEX idx_entity_links_temporal ON literature_entity_links(created_at, entity_name);
+  CREATE INDEX idx_entity_links_relation ON literature_entity_links(relation_type, entity_name);
   ```
-
-- [ ] **Core Link Management Tools:**
-  - [ ] Implement basic entity linking tools:
-    ```python
-    @mcp.tool()
-    def link_paper_to_entity(
-        id_str: str,
-        entity_name: str,
-        relation_type: str,
-        context: Optional[str] = None,
-        notes: Optional[str] = None
-    ) -> Dict[str, Any]
-    ```
-  - [ ] Add entity link management:
-    ```python
-    def update_entity_link(...)  # Update existing links
-    def remove_entity_link(...)  # Remove entity links
-    def get_paper_entities(...)  # Get entities for a paper
-    def get_entity_papers(...)   # Get papers for an entity
-    ```
-
-## Phase 2: Reading Integration
-
-- [OK] **Enhance Section Progress:**
-
-  - [ ] Modify `track_reading_progress` schema and function:
-    ```python
-    def track_reading_progress(
-        id_str: str,
-        section: str,
-        status: str,
-        key_points: Optional[List[str]] = None,
-        entities: Optional[List[Dict[str, str]]] = None  # New parameter
-    )
-    ```
-  - [ ] Add entity context tracking to section progress
-  - [ ] Support bulk entity linking during reading
-
-- [ ] **Note Taking Integration:**
-  - [ ] Enhance note taking with entity support:
-    ```python
-    def update_literature_notes(
-        id_str: str,
-        note_type: str,
-        content: str,
-        entities: Optional[List[Dict[str, str]]] = None,  # New parameter
-        append: bool = True,
-        timestamp: bool = True
-    )
-    ```
-  - [ ] Add entity extraction from notes
-  - [ ] Support entity linking in specific note sections
-
-## Phase 3: Query & Analysis
-
-- [OK] **Basic Query Tools:**
-
-  ```python
-  @mcp.tool()
-  def find_papers_by_entities(
-      entity_names: List[str],
-      match_type: str = 'any'  # 'any', 'all', 'exact'
-  ) -> List[Dict[str, Any]]
-
-  @mcp.tool()
-  def get_entity_relationships(
-      entity_name: str
-  ) -> Dict[str, Any]
-
-  @mcp.tool()
-  def find_common_papers(
-      entity_names: List[str]
-  ) -> List[Dict[str, Any]]
+- [ ] Add indexes for reading progress tracking:
+  ```sql
+  CREATE INDEX idx_section_progress_compound ON section_progress(literature_id, status);
+  CREATE INDEX idx_reading_list_importance ON reading_list(importance, status);
   ```
+- [ ] Benchmark and validate index performance
+- [ ] Document index usage patterns
 
-- [OK] **Analysis Tools:**
+### Caching Implementation
 
+- [ ] Design cache structure:
   ```python
-  @mcp.tool()
-  def analyze_entity_coverage() -> Dict[str, Any]
+  class EntityCache:
+      def __init__(self, max_size: int = 1000):
+          self.cache = {}
+          self.max_size = max_size
+          self.stats = {'hits': 0, 'misses': 0}
+  ```
+- [ ] Implement LRU caching for entities
+- [ ] Add cache warming for frequently accessed entities
+- [ ] Implement cache invalidation strategy
+- [ ] Add cache statistics monitoring
+- [ ] Create cache configuration system
 
-  @mcp.tool()
-  def find_related_entities(
-      id_str: str
-  ) -> List[Dict[str, Any]]
+## Phase 2: Bulk Operations Support
 
-  @mcp.tool()
-  def get_entity_paper_stats(
-      entity_name: str
+### Entity Operations
+
+- [ ] Implement bulk entity linking:
+  ```python
+  def bulk_link_entities(
+      literature_ids: List[str],
+      entity_mappings: List[Dict[str, Any]]
   ) -> Dict[str, Any]
   ```
+- [ ] Add batch entity updates
+- [ ] Create bulk entity removal
+- [ ] Implement transaction management for bulk operations
 
-## Phase 4: Integration with Memory Graph
+### Literature Operations
 
-- [OK] **Memory Graph Reading:**
-
-  - [ ] Add configuration for memory graph location:
-    ```python
-    MEMORY_GRAPH_PATH = os.environ.get('MEMORY_GRAPH_PATH')
-    ```
-  - [ ] Implement memory graph parsing:
-
-    ```python
-    class MemoryGraphReader:
-        def __init__(self, path: Path):
-            self.path = path
-
-        def get_entity(self, name: str) -> Optional[Dict[str, Any]]:
-            pass
-
-        def validate_entity(self, name: str) -> bool:
-            pass
-    ```
-
-  - [ ] Add entity validation against memory graph
-
-- [OK] **Synchronization Tools:**
-  - [ ] Track memory graph updates
-  - [ ] Handle entity renames/merges
-  - [ ] Clean up orphaned links
-
-## Phase 5: Research Support
-
-- [OK] **Enhanced Search:**
-
+- [ ] Add bulk status updates:
   ```python
-  @mcp.tool()
-  def search_papers_by_entity_pattern(
-      pattern: Dict[str, Any]  # Entity relationship pattern
-  ) -> List[Dict[str, Any]]
+  def bulk_update_status(
+      literature_ids: List[str],
+      status: str
+  ) -> Dict[str, Any]
+  ```
+- [ ] Implement bulk tag management
+- [ ] Add batch collection operations
+- [ ] Create progress batch updates
 
-  @mcp.tool()
-  def find_bridging_papers(
-      entity_names: List[str]
+## Phase 3: Entity Suggestions System
+
+### Core Suggestion Engine
+
+- [ ] Implement co-occurrence analysis:
+  ```python
+  def analyze_entity_cooccurrence(
+      min_confidence: float = 0.5
+  ) -> Dict[str, Any]
+  ```
+- [ ] Create frequency-based suggestions
+- [ ] Add context-aware recommendations
+- [ ] Implement confidence scoring
+
+### Suggestion Integration
+
+- [ ] Add real-time suggestions during reading
+- [ ] Implement section-based suggestions
+- [ ] Create related entities recommendations
+- [ ] Add feedback mechanism for suggestions
+
+## Phase 4: Quick Lookup Tools
+
+### Search Enhancement
+
+- [ ] Implement partial name matching:
+  ```python
+  def quick_entity_lookup(
+      partial_name: str,
+      context: Optional[str] = None,
+      limit: int = 10
   ) -> List[Dict[str, Any]]
   ```
+- [ ] Add fuzzy search capabilities
+- [ ] Create compound search (entity + context)
+- [ ] Implement search result caching
 
-- [OK] **Research Insights:**
+### Recent Items System
+
+- [ ] Add recently used entities tracking:
+  ```python
+  def get_recent_entities(
+      time_window: str = "24h",
+      limit: int = 20
+  ) -> List[Dict[str, Any]]
+  ```
+- [ ] Implement usage statistics
+- [ ] Create frequency-based suggestions
+- [ ] Add user-specific recent items
+
+## Phase 5: Interactive Workflows
+
+### Session Management
+
+- [ ] Create entity linking sessions:
 
   ```python
-  @mcp.tool()
-  def generate_entity_summary(
-      entity_name: str
+  def start_entity_linking_session(
+      literature_id: str
   ) -> Dict[str, Any]
 
-  @mcp.tool()
-  def track_entity_evolution(
-      entity_name: str
-  ) -> List[Dict[str, Any]]
+  def continue_entity_linking_session(
+      session_id: str,
+      section: str,
+      entities: List[Dict[str, Any]]
+  ) -> Dict[str, Any]
   ```
 
-## Phase 6: Testing & Documentation
+- [ ] Implement session state management
+- [ ] Add progress tracking
+- [ ] Create session recovery mechanism
 
-- [ ] **Testing:**
+### Progressive Operations
 
-  - [ ] Unit tests for all new tools
-  - [ ] Integration tests with sample memory graph
-  - [ ] Edge case handling
-  - [ ] Performance benchmarks
+- [ ] Implement step-by-step entity linking
+- [ ] Add contextual suggestions in workflow
+- [ ] Create interactive validation
+- [ ] Implement undo/redo support
 
-- [OK] **Documentation:**
-  - [ ] Update README with memory graph features
-  - [ ] Add example workflows for entity linking
-  - [ ] Document best practices
-  - [ ] API documentation for new tools
+### Workflow Optimization
 
-## Phase 7: Workflow Optimization
+- [ ] Add batch preview capabilities
+- [ ] Implement operation scheduling
+- [ ] Create workflow templates
+- [ ] Add customizable workflows
 
-- [ ] **User Experience:**
+## Future Considerations
 
-  - [ ] Implement bulk operations
-  - [ ] Add entity suggestions
-  - [ ] Create quick lookup tools
-  - [ ] Add interactive workflows
-
-- [ ] **Performance:**
-  - [ ] Query optimization
-  - [ ] Implement caching
-  - [ ] Index tuning
-  - [ ] Batch operations
+- [ ] Performance monitoring system
+- [ ] Advanced caching strategies
+- [ ] Real-time entity graph visualization
+- [ ] Machine learning-based suggestions
+- [ ] Automated workflow optimization
 
 ## Notes
 
-- All new tools should follow existing error handling patterns
-- Maintain backward compatibility where possible
-- Consider adding versioning to entity links
-- Plan for future extensibility (e.g., more relationship types)
-- Keep memory graph synchronization lightweight and efficient
+- Implement features incrementally
+- Add comprehensive tests for each feature
+- Document performance impacts
+- Monitor system resources
+- Regular benchmark testing
