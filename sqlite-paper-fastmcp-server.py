@@ -1161,6 +1161,264 @@ def get_entities_by_context(
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
+@mcp.tool()
+def find_papers_by_entities(
+    entity_names: List[str],
+    match_type: str = 'any',  # 'any', 'all', 'exact'
+    relation_types: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Find papers that are linked to specified entities.
+    
+    Args:
+        entity_names: List of entity names to search for
+        match_type: How to match entities:
+                   'any' - papers linked to any of the entities
+                   'all' - papers linked to all entities
+                   'exact' - papers linked to exactly these entities
+        relation_types: Optional list of relation types to filter by
+        
+    Returns:
+        Dictionary containing matching papers and statistics
+    """
+    # Validate match_type
+    if match_type not in {'any', 'all', 'exact'}:
+        raise ValueError("match_type must be one of: 'any', 'all', 'exact'")
+    
+    # Validate relation_types if provided
+    if relation_types:
+        invalid_types = set(relation_types) - LiteratureIdentifier.VALID_ENTITY_RELATIONS
+        if invalid_types:
+            raise ValueError(f"Invalid relation types: {', '.join(invalid_types)}")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            if match_type == 'any':
+                query = """
+                    SELECT DISTINCT 
+                        r.*,
+                        COUNT(l.entity_name) as match_count,
+                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
+                    FROM reading_list r
+                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                    WHERE l.entity_name IN ({})
+                    {}
+                    GROUP BY r.literature_id
+                    ORDER BY match_count DESC, r.importance DESC
+                """.format(
+                    ','.join(['?'] * len(entity_names)),
+                    "AND l.relation_type IN ({})".format(
+                        ','.join(['?'] * len(relation_types))
+                    ) if relation_types else ""
+                )
+                params = entity_names + (relation_types or [])
+                
+            elif match_type == 'all':
+                query = """
+                    SELECT 
+                        r.*,
+                        COUNT(DISTINCT l.entity_name) as match_count,
+                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
+                    FROM reading_list r
+                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                    WHERE l.entity_name IN ({})
+                    {}
+                    GROUP BY r.literature_id
+                    HAVING match_count = ?
+                    ORDER BY r.importance DESC
+                """.format(
+                    ','.join(['?'] * len(entity_names)),
+                    "AND l.relation_type IN ({})".format(
+                        ','.join(['?'] * len(relation_types))
+                    ) if relation_types else ""
+                )
+                params = entity_names + (relation_types or []) + [len(entity_names)]
+            
+            else:  # exact
+                query = """
+                    WITH PaperEntityCounts AS (
+                        SELECT 
+                            r.literature_id,
+                            COUNT(DISTINCT l.entity_name) as total_entities
+                        FROM reading_list r
+                        JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                        GROUP BY r.literature_id
+                    )
+                    SELECT 
+                        r.*,
+                        COUNT(DISTINCT l.entity_name) as match_count,
+                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
+                    FROM reading_list r
+                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                    JOIN PaperEntityCounts pec ON r.literature_id = pec.literature_id
+                    WHERE l.entity_name IN ({})
+                    {}
+                    GROUP BY r.literature_id
+                    HAVING match_count = ? AND pec.total_entities = ?
+                    ORDER BY r.importance DESC
+                """.format(
+                    ','.join(['?'] * len(entity_names)),
+                    "AND l.relation_type IN ({})".format(
+                        ','.join(['?'] * len(relation_types))
+                    ) if relation_types else ""
+                )
+                params = entity_names + (relation_types or []) + [len(entity_names), len(entity_names)]
+            
+            cursor.execute(query, params)
+            papers = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "match_type": match_type,
+                "entity_count": len(entity_names),
+                "papers_found": len(papers),
+                "papers": papers
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def analyze_entity_coverage() -> Dict[str, Any]:
+    """Analyze how entities are covered across the literature database.
+    Returns statistics about entity coverage and potential gaps.
+    
+    Returns:
+        Dictionary containing entity coverage statistics and analysis
+    """
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Get entity statistics
+            cursor.execute("""
+                WITH EntityStats AS (
+                    SELECT 
+                        entity_name,
+                        COUNT(DISTINCT literature_id) as paper_count,
+                        GROUP_CONCAT(DISTINCT relation_type) as relation_types,
+                        COUNT(DISTINCT context) as context_count,
+                        GROUP_CONCAT(DISTINCT context) as contexts
+                    FROM literature_entity_links
+                    GROUP BY entity_name
+                )
+                SELECT 
+                    entity_name,
+                    paper_count,
+                    relation_types,
+                    context_count,
+                    contexts,
+                    CASE 
+                        WHEN paper_count < 2 THEN 'low_coverage'
+                        WHEN paper_count < 5 THEN 'medium_coverage'
+                        ELSE 'well_covered'
+                    END as coverage_level
+                FROM EntityStats
+                ORDER BY paper_count DESC, entity_name
+            """)
+            
+            entity_stats = [dict(row) for row in cursor.fetchall()]
+            
+            # Get overview statistics
+            overview = {
+                "total_entities": len(entity_stats),
+                "coverage_distribution": {
+                    "low_coverage": len([e for e in entity_stats if e['coverage_level'] == 'low_coverage']),
+                    "medium_coverage": len([e for e in entity_stats if e['coverage_level'] == 'medium_coverage']),
+                    "well_covered": len([e for e in entity_stats if e['coverage_level'] == 'well_covered'])
+                },
+                "context_stats": {
+                    "avg_contexts_per_entity": sum(e['context_count'] for e in entity_stats) / len(entity_stats) if entity_stats else 0,
+                    "single_context_entities": len([e for e in entity_stats if e['context_count'] == 1])
+                }
+            }
+            
+            return {
+                "overview": overview,
+                "entity_stats": entity_stats
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def find_related_entities(
+    literature_id: Optional[str] = None,
+    entity_name: Optional[str] = None,
+    min_co_occurrences: int = 1
+) -> Dict[str, Any]:
+    """Find entities that frequently appear together.
+    Can search based on either a paper or another entity.
+    
+    Args:
+        literature_id: Optional paper ID to find related entities
+        entity_name: Optional entity name to find related entities
+        min_co_occurrences: Minimum number of co-occurrences required
+        
+    Returns:
+        Dictionary containing related entities and their relationships
+    """
+    if not (literature_id or entity_name):
+        raise ValueError("Must provide either literature_id or entity_name")
+    
+    if literature_id and entity_name:
+        raise ValueError("Cannot provide both literature_id and entity_name")
+        
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            if literature_id:
+                lit_id = LiteratureIdentifier(literature_id)
+                # Find entities related through the same paper
+                query = """
+                    SELECT 
+                        l2.entity_name,
+                        l2.relation_type,
+                        l2.context,
+                        l2.notes,
+                        COUNT(*) as co_occurrence_count
+                    FROM literature_entity_links l1
+                    JOIN literature_entity_links l2 
+                        ON l1.literature_id = l2.literature_id
+                        AND l1.entity_name != l2.entity_name
+                    WHERE l1.literature_id = ?
+                    GROUP BY l2.entity_name, l2.relation_type, l2.context
+                    HAVING co_occurrence_count >= ?
+                    ORDER BY co_occurrence_count DESC, l2.entity_name
+                """
+                params = [lit_id.full_id, min_co_occurrences]
+            else:
+                # Find entities that frequently appear with the given entity
+                query = """
+                    SELECT 
+                        l2.entity_name,
+                        GROUP_CONCAT(DISTINCT l2.relation_type) as relation_types,
+                        COUNT(DISTINCT l1.literature_id) as shared_papers,
+                        GROUP_CONCAT(DISTINCT l2.context) as contexts,
+                        GROUP_CONCAT(DISTINCT l2.notes) as notes
+                    FROM literature_entity_links l1
+                    JOIN literature_entity_links l2 
+                        ON l1.literature_id = l2.literature_id
+                        AND l1.entity_name != l2.entity_name
+                    WHERE l1.entity_name = ?
+                    GROUP BY l2.entity_name
+                    HAVING shared_papers >= ?
+                    ORDER BY shared_papers DESC, l2.entity_name
+                """
+                params = [entity_name, min_co_occurrences]
+            
+            cursor.execute(query, params)
+            related_entities = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "source_type": "paper" if literature_id else "entity",
+                "source": literature_id or entity_name,
+                "min_co_occurrences": min_co_occurrences,
+                "related_count": len(related_entities),
+                "related_entities": related_entities
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
 if __name__ == "__main__":
     # Start the FastMCP server
     mcp.run()
