@@ -1,15 +1,14 @@
+Let me help refine this TODO list based on our previous discussion about simplification and focusing on core functionality. Here's a streamlined version:
+
 # Literature Management System - TODO List
 
 ## Phase 1: Core System Cleanup
 
 ### Schema Simplification
 
-- [ ] Remove `section_progress` table and related functionality
-- [ ] Remove `paper_relations` table and related functionality
-- [ ] Merge collections into tags system:
-  - [ ] Add tag categories/types
-  - [ ] Migrate collection data to tags
-  - [ ] Update tag-related queries
+- [ ] Remove `section_progress` table completely
+- [ ] Remove `paper_relations` table completely
+- [ ] Remove `collections` and `collection_items` tables, using tags instead
 - [ ] Add source metadata to `reading_list`:
   ```sql
   ALTER TABLE reading_list
@@ -17,57 +16,38 @@
   ADD COLUMN source_url TEXT;
   ```
 - [ ] Simplify `literature_entity_links`:
-  - [ ] Remove redundant fields
-  - [ ] Optimize indices
-  - [ ] Add validation constraints
+  ```sql
+  -- Remove context field
+  -- Keep only essential fields:
+  -- literature_id, entity_name, relation_type, notes
+  ```
 
 ### Tool Removal
 
-- [ ] Remove section-based tools:
+- [ ] Remove tools:
   - [ ] `track_reading_progress`
-  - [ ] `get_reading_progress`
-  - [ ] Section-related validation code
-- [ ] Remove relationship tools:
   - [ ] `add_literature_relation`
-  - [ ] `find_related_papers`
-  - [ ] Relationship validation code
-- [ ] Remove research analysis tools:
   - [ ] `identify_research_gaps`
   - [ ] `track_entity_evolution`
-  - [ ] Analysis-related queries
-- [ ] Remove collection tools:
-  - [ ] `create_collection`
-  - [ ] `add_to_collection`
-  - [ ] Collection management code
+  - [ ] All collection-related tools
+  - [ ] `sync_entity_links` (keep memory graph read-only)
 
 ### Tool Simplification
 
-- [ ] Simplify status tracking:
+- [ ] Simplify reading status tools:
+
   ```python
   def update_literature_status(
       id_str: str,
-      status: str,
+      status: str,  # only: 'unread', 'reading', 'completed', 'archived'
       notes: Optional[str] = None
   ) -> Dict[str, Any]
   ```
-- [ ] Redesign entity context handling:
+
+- [ ] Simplify entity context handling:
   ```python
   def get_literature_entities(
-      id_str: str,
-      include_metadata: bool = False
-  ) -> Dict[str, Any]
-  ```
-- [ ] Update statistics tool:
-  ```python
-  def get_literature_stats(
-      id_str: str,
-      include_entities: bool = True
-  ) -> Dict[str, Any]
-  ```
-- [ ] Simplify entity validation:
-  ```python
-  def validate_entity_links(
-      entity_names: List[str]
+      id_str: str
   ) -> Dict[str, Any]
   ```
 
@@ -79,99 +59,48 @@
   ```python
   VALID_SOURCES = {
       'arxiv', 'doi', 'semanticscholar',
-      'github', 'webpage', 'custom'
+      'webpage', 'blog', 'video', 'book', 'custom'
   }
   ```
-- [ ] Add source type validation:
-  ```python
-  def validate_source(
-      source_type: str,
-      source_url: Optional[str]
-  ) -> bool
-  ```
-- [ ] Update tools for source handling:
-  - [ ] Add source metadata extraction
-  - [ ] Handle source-specific validation
-  - [ ] Support source URL validation
 
 ### Bulk Operations
 
-- [ ] Implement bulk literature addition:
+- [ ] Add bulk literature import:
+
   ```python
   def bulk_add_literature(
-      items: List[Dict[str, Any]],
-      validate: bool = True
+      items: List[Dict[str, Any]]
   ) -> Dict[str, Any]
   ```
-- [ ] Implement bulk entity linking:
+
+- [ ] Add bulk entity linking:
   ```python
-  def bulk_link_entities(
-      links: List[Dict[str, Any]],
-      validate: bool = True
+  def bulk_link_paper_entities(
+      id_str: str,
+      entities: List[Dict[str, str]]
   ) -> Dict[str, Any]
   ```
-- [ ] Add validation and error handling:
-  - [ ] Batch size limits
-  - [ ] Transaction management
-  - [ ] Error reporting
-  - [ ] Rollback support
 
 ### Documentation Updates
 
-- [ ] Update schema documentation:
-  - [ ] New table structure
-  - [ ] Field descriptions
-  - [ ] Constraints and indices
-- [ ] Create usage examples:
-
-  ```python
-  # Example: Adding literature from different sources
-  add_literature(
-      "arxiv:2312.12456",
-      source_url="https://arxiv.org/abs/2312.12456"
-  )
-
-  # Example: Bulk entity linking
-  bulk_link_entities([
-      {
-          "literature_id": "arxiv:2312.12456",
-          "entities": [
-              {"name": "transformer", "relation": "discusses"},
-              {"name": "attention", "relation": "evaluates"}
-          ]
-      }
-  ])
-  ```
-
-- [ ] Document memory graph integration:
-  - [ ] Entity validation workflow
-  - [ ] Synchronization best practices
-  - [ ] Error handling
-- [ ] Add source-specific examples:
-  - [ ] arXiv integration
-  - [ ] DOI handling
-  - [ ] Semantic Scholar integration
-  - [ ] Custom source usage
+- [ ] Update schema documentation
+- [ ] Add examples for different source types
+- [ ] Document memory graph integration (read-only)
+- [ ] Add bulk operation examples
 
 ## Testing Requirements
 
-### Unit Tests
-
-- [ ] Schema validation tests
-- [ ] Source type validation tests
-- [ ] Bulk operation tests
-- [ ] Entity linking tests
-
-### Integration Tests
-
-- [ ] Memory graph integration tests
+- [ ] Basic schema validation tests
 - [ ] Source type handling tests
-- [ ] Bulk operation performance tests
-- [ ] Error handling tests
+- [ ] Bulk operation tests
+- [ ] Memory graph read-only integration tests
 
-### Performance Tests
+Key differences from original:
 
-- [ ] Bulk operation benchmarks
-- [ ] Query optimization tests
-- [ ] Memory usage monitoring
-- [ ] Response time validation
+1. Removed complex features like section tracking and research analysis
+2. Simplified entity linking by removing context field
+3. Removed collections in favor of simple tags
+4. Focused on essential bulk operations only
+5. Simplified testing requirements to core functionality
+6. Removed performance testing as it's not critical for our lightweight system
+7. Kept memory graph integration read-only
