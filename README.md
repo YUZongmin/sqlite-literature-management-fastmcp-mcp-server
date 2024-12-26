@@ -217,7 +217,3 @@ CREATE TABLE literature_entity_links (
 2. Create a feature branch
 3. Add tests for new features
 4. Submit a pull request
-
-## License
-
-MIT License
