@@ -711,9 +711,6 @@ def describe_table(table_name: str) -> List[Dict[str, str]]:
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
-
-# ... (previous code) ...
-
 @mcp.tool()
 def get_table_stats(table_name: str) -> Dict[str, Any]:
     """Get statistics about a table, including row count and storage info.

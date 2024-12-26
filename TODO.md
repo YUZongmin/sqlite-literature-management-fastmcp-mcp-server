@@ -1,166 +1,177 @@
-# TODO: Literature Management System Performance Optimization
+# Literature Management System - TODO List
 
-## Phase 1: Index Tuning and Caching
+## Phase 1: Core System Cleanup
 
-### Index Optimization
+### Schema Simplification
 
-- [ ] Analyze current query patterns in production
-- [ ] Add composite indexes for entity suggestions:
+- [ ] Remove `section_progress` table and related functionality
+- [ ] Remove `paper_relations` table and related functionality
+- [ ] Merge collections into tags system:
+  - [ ] Add tag categories/types
+  - [ ] Migrate collection data to tags
+  - [ ] Update tag-related queries
+- [ ] Add source metadata to `reading_list`:
   ```sql
-  CREATE INDEX idx_entity_links_context ON literature_entity_links(entity_name, context);
-  CREATE INDEX idx_entity_links_temporal ON literature_entity_links(created_at, entity_name);
-  CREATE INDEX idx_entity_links_relation ON literature_entity_links(relation_type, entity_name);
+  ALTER TABLE reading_list
+  ADD COLUMN source_type TEXT,
+  ADD COLUMN source_url TEXT;
   ```
-- [ ] Add indexes for reading progress tracking:
-  ```sql
-  CREATE INDEX idx_section_progress_compound ON section_progress(literature_id, status);
-  CREATE INDEX idx_reading_list_importance ON reading_list(importance, status);
-  ```
-- [ ] Benchmark and validate index performance
-- [ ] Document index usage patterns
+- [ ] Simplify `literature_entity_links`:
+  - [ ] Remove redundant fields
+  - [ ] Optimize indices
+  - [ ] Add validation constraints
 
-### Caching Implementation
+### Tool Removal
 
-- [ ] Design cache structure:
+- [ ] Remove section-based tools:
+  - [ ] `track_reading_progress`
+  - [ ] `get_reading_progress`
+  - [ ] Section-related validation code
+- [ ] Remove relationship tools:
+  - [ ] `add_literature_relation`
+  - [ ] `find_related_papers`
+  - [ ] Relationship validation code
+- [ ] Remove research analysis tools:
+  - [ ] `identify_research_gaps`
+  - [ ] `track_entity_evolution`
+  - [ ] Analysis-related queries
+- [ ] Remove collection tools:
+  - [ ] `create_collection`
+  - [ ] `add_to_collection`
+  - [ ] Collection management code
+
+### Tool Simplification
+
+- [ ] Simplify status tracking:
   ```python
-  class EntityCache:
-      def __init__(self, max_size: int = 1000):
-          self.cache = {}
-          self.max_size = max_size
-          self.stats = {'hits': 0, 'misses': 0}
+  def update_literature_status(
+      id_str: str,
+      status: str,
+      notes: Optional[str] = None
+  ) -> Dict[str, Any]
   ```
-- [ ] Implement LRU caching for entities
-- [ ] Add cache warming for frequently accessed entities
-- [ ] Implement cache invalidation strategy
-- [ ] Add cache statistics monitoring
-- [ ] Create cache configuration system
+- [ ] Redesign entity context handling:
+  ```python
+  def get_literature_entities(
+      id_str: str,
+      include_metadata: bool = False
+  ) -> Dict[str, Any]
+  ```
+- [ ] Update statistics tool:
+  ```python
+  def get_literature_stats(
+      id_str: str,
+      include_entities: bool = True
+  ) -> Dict[str, Any]
+  ```
+- [ ] Simplify entity validation:
+  ```python
+  def validate_entity_links(
+      entity_names: List[str]
+  ) -> Dict[str, Any]
+  ```
 
-## Phase 2: Bulk Operations Support
+## Phase 2: Core Functionality Enhancement
 
-### Entity Operations
+### Source Type Support
 
+- [ ] Expand `LiteratureIdentifier`:
+  ```python
+  VALID_SOURCES = {
+      'arxiv', 'doi', 'semanticscholar',
+      'github', 'webpage', 'custom'
+  }
+  ```
+- [ ] Add source type validation:
+  ```python
+  def validate_source(
+      source_type: str,
+      source_url: Optional[str]
+  ) -> bool
+  ```
+- [ ] Update tools for source handling:
+  - [ ] Add source metadata extraction
+  - [ ] Handle source-specific validation
+  - [ ] Support source URL validation
+
+### Bulk Operations
+
+- [ ] Implement bulk literature addition:
+  ```python
+  def bulk_add_literature(
+      items: List[Dict[str, Any]],
+      validate: bool = True
+  ) -> Dict[str, Any]
+  ```
 - [ ] Implement bulk entity linking:
   ```python
   def bulk_link_entities(
-      literature_ids: List[str],
-      entity_mappings: List[Dict[str, Any]]
+      links: List[Dict[str, Any]],
+      validate: bool = True
   ) -> Dict[str, Any]
   ```
-- [ ] Add batch entity updates
-- [ ] Create bulk entity removal
-- [ ] Implement transaction management for bulk operations
+- [ ] Add validation and error handling:
+  - [ ] Batch size limits
+  - [ ] Transaction management
+  - [ ] Error reporting
+  - [ ] Rollback support
 
-### Literature Operations
+### Documentation Updates
 
-- [ ] Add bulk status updates:
-  ```python
-  def bulk_update_status(
-      literature_ids: List[str],
-      status: str
-  ) -> Dict[str, Any]
-  ```
-- [ ] Implement bulk tag management
-- [ ] Add batch collection operations
-- [ ] Create progress batch updates
-
-## Phase 3: Entity Suggestions System
-
-### Core Suggestion Engine
-
-- [ ] Implement co-occurrence analysis:
-  ```python
-  def analyze_entity_cooccurrence(
-      min_confidence: float = 0.5
-  ) -> Dict[str, Any]
-  ```
-- [ ] Create frequency-based suggestions
-- [ ] Add context-aware recommendations
-- [ ] Implement confidence scoring
-
-### Suggestion Integration
-
-- [ ] Add real-time suggestions during reading
-- [ ] Implement section-based suggestions
-- [ ] Create related entities recommendations
-- [ ] Add feedback mechanism for suggestions
-
-## Phase 4: Quick Lookup Tools
-
-### Search Enhancement
-
-- [ ] Implement partial name matching:
-  ```python
-  def quick_entity_lookup(
-      partial_name: str,
-      context: Optional[str] = None,
-      limit: int = 10
-  ) -> List[Dict[str, Any]]
-  ```
-- [ ] Add fuzzy search capabilities
-- [ ] Create compound search (entity + context)
-- [ ] Implement search result caching
-
-### Recent Items System
-
-- [ ] Add recently used entities tracking:
-  ```python
-  def get_recent_entities(
-      time_window: str = "24h",
-      limit: int = 20
-  ) -> List[Dict[str, Any]]
-  ```
-- [ ] Implement usage statistics
-- [ ] Create frequency-based suggestions
-- [ ] Add user-specific recent items
-
-## Phase 5: Interactive Workflows
-
-### Session Management
-
-- [ ] Create entity linking sessions:
+- [ ] Update schema documentation:
+  - [ ] New table structure
+  - [ ] Field descriptions
+  - [ ] Constraints and indices
+- [ ] Create usage examples:
 
   ```python
-  def start_entity_linking_session(
-      literature_id: str
-  ) -> Dict[str, Any]
+  # Example: Adding literature from different sources
+  add_literature(
+      "arxiv:2312.12456",
+      source_url="https://arxiv.org/abs/2312.12456"
+  )
 
-  def continue_entity_linking_session(
-      session_id: str,
-      section: str,
-      entities: List[Dict[str, Any]]
-  ) -> Dict[str, Any]
+  # Example: Bulk entity linking
+  bulk_link_entities([
+      {
+          "literature_id": "arxiv:2312.12456",
+          "entities": [
+              {"name": "transformer", "relation": "discusses"},
+              {"name": "attention", "relation": "evaluates"}
+          ]
+      }
+  ])
   ```
 
-- [ ] Implement session state management
-- [ ] Add progress tracking
-- [ ] Create session recovery mechanism
+- [ ] Document memory graph integration:
+  - [ ] Entity validation workflow
+  - [ ] Synchronization best practices
+  - [ ] Error handling
+- [ ] Add source-specific examples:
+  - [ ] arXiv integration
+  - [ ] DOI handling
+  - [ ] Semantic Scholar integration
+  - [ ] Custom source usage
 
-### Progressive Operations
+## Testing Requirements
 
-- [ ] Implement step-by-step entity linking
-- [ ] Add contextual suggestions in workflow
-- [ ] Create interactive validation
-- [ ] Implement undo/redo support
+### Unit Tests
 
-### Workflow Optimization
+- [ ] Schema validation tests
+- [ ] Source type validation tests
+- [ ] Bulk operation tests
+- [ ] Entity linking tests
 
-- [ ] Add batch preview capabilities
-- [ ] Implement operation scheduling
-- [ ] Create workflow templates
-- [ ] Add customizable workflows
+### Integration Tests
 
-## Future Considerations
+- [ ] Memory graph integration tests
+- [ ] Source type handling tests
+- [ ] Bulk operation performance tests
+- [ ] Error handling tests
 
-- [ ] Performance monitoring system
-- [ ] Advanced caching strategies
-- [ ] Real-time entity graph visualization
-- [ ] Machine learning-based suggestions
-- [ ] Automated workflow optimization
+### Performance Tests
 
-## Notes
-
-- Implement features incrementally
-- Add comprehensive tests for each feature
-- Document performance impacts
-- Monitor system resources
-- Regular benchmark testing
+- [ ] Bulk operation benchmarks
+- [ ] Query optimization tests
+- [ ] Memory usage monitoring
+- [ ] Response time validation
