@@ -4,7 +4,7 @@ This document outlines the plan to extend the literature server with memory grap
 
 ## Phase 1: Foundation - Basic Entity Linking
 
-- [ ] **Schema Enhancement:**
+- [OK] **Schema Enhancement:**
 
   ```sql
   -- Single table for tracking paper-entity relationships
@@ -44,7 +44,7 @@ This document outlines the plan to extend the literature server with memory grap
 
 ## Phase 2: Reading Integration
 
-- [ ] **Enhance Section Progress:**
+- [OK] **Enhance Section Progress:**
 
   - [ ] Modify `track_reading_progress` schema and function:
     ```python
@@ -76,7 +76,7 @@ This document outlines the plan to extend the literature server with memory grap
 
 ## Phase 3: Query & Analysis
 
-- [ ] **Basic Query Tools:**
+- [OK] **Basic Query Tools:**
 
   ```python
   @mcp.tool()
@@ -96,7 +96,7 @@ This document outlines the plan to extend the literature server with memory grap
   ) -> List[Dict[str, Any]]
   ```
 
-- [ ] **Analysis Tools:**
+- [OK] **Analysis Tools:**
 
   ```python
   @mcp.tool()
@@ -115,7 +115,7 @@ This document outlines the plan to extend the literature server with memory grap
 
 ## Phase 4: Integration with Memory Graph
 
-- [ ] **Memory Graph Reading:**
+- [OK] **Memory Graph Reading:**
 
   - [ ] Add configuration for memory graph location:
     ```python
@@ -137,14 +137,14 @@ This document outlines the plan to extend the literature server with memory grap
 
   - [ ] Add entity validation against memory graph
 
-- [ ] **Synchronization Tools:**
+- [OK] **Synchronization Tools:**
   - [ ] Track memory graph updates
   - [ ] Handle entity renames/merges
   - [ ] Clean up orphaned links
 
 ## Phase 5: Research Support
 
-- [ ] **Enhanced Search:**
+- [OK] **Enhanced Search:**
 
   ```python
   @mcp.tool()
@@ -158,7 +158,7 @@ This document outlines the plan to extend the literature server with memory grap
   ) -> List[Dict[str, Any]]
   ```
 
-- [ ] **Research Insights:**
+- [OK] **Research Insights:**
 
   ```python
   @mcp.tool()
@@ -181,7 +181,7 @@ This document outlines the plan to extend the literature server with memory grap
   - [ ] Edge case handling
   - [ ] Performance benchmarks
 
-- [ ] **Documentation:**
+- [OK] **Documentation:**
   - [ ] Update README with memory graph features
   - [ ] Add example workflows for entity linking
   - [ ] Document best practices
