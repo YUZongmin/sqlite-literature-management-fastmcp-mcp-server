@@ -185,15 +185,20 @@ def update_literature_notes(
     id_str: str,
     note_type: str,  # 'summary', 'critique', 'implementation', 'future_work'
     content: str,
+    entities: Optional[List[Dict[str, str]]] = None,  # New parameter
     append: bool = True,  # if True, append to existing notes, if False, replace
     timestamp: bool = True  # if True, add timestamp to note
 ) -> Dict[str, Any]:
-    """Update structured notes for literature.
+    """Update structured notes for literature with entity linking.
     
     Args:
         id_str: Literature ID in format "source:id"
         note_type: Type of note ('summary', 'critique', 'implementation', 'future_work')
         content: Note content
+        entities: Optional list of entities mentioned in these notes
+                 Format: [{"name": "entity_name", 
+                          "relation_type": "discusses",
+                          "notes": "from [note_type] notes: [context]"}]
         append: If True, append to existing notes, if False, replace
         timestamp: If True, add timestamp to note
     
@@ -227,14 +232,43 @@ def update_literature_notes(
                 new_notes = re.sub(pattern, "", existing_notes, flags=re.DOTALL)
                 new_notes += formatted_note
             
+            # Update notes
             cursor.execute("""
                 UPDATE reading_list 
                 SET notes = ?, last_accessed = CURRENT_TIMESTAMP
                 WHERE literature_id = ?
             """, [new_notes, lit_id.full_id])
             
+            # Add entity links if provided
+            if entities:
+                for entity in entities:
+                    # Validate relation type
+                    relation_type = entity.get('relation_type', 'discusses')
+                    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+                        raise ValueError(f"Invalid relation type '{relation_type}'. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
+                    
+                    # Create context from note type
+                    context = f"{note_type.lower()}_notes"
+                    notes = entity.get('notes') or f"Mentioned in {note_type.lower()} notes"
+                    
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO literature_entity_links
+                        (literature_id, entity_name, relation_type, context, notes)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, [
+                        lit_id.full_id,
+                        entity['name'],
+                        relation_type,
+                        context,
+                        notes
+                    ])
+            
             conn.commit()
-            return {"status": "success", "literature_id": lit_id.full_id}
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entities_linked": len(entities) if entities else 0
+            }
             
         except sqlite3.Error as e:
             conn.rollback()
@@ -283,9 +317,10 @@ def add_literature_relation(
 @mcp.tool()
 def track_reading_progress(
     id_str: str,
-    section: str,  # e.g., 'introduction', 'methods', 'results', 'discussion'
-    status: str,  # 'not_started', 'in_progress', 'completed'
-    key_points: Optional[List[str]] = None
+    section: str,
+    status: str,
+    key_points: Optional[List[str]] = None,
+    entities: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
     """Track detailed reading progress by section.
     
@@ -294,6 +329,10 @@ def track_reading_progress(
         section: Section name
         status: Reading status for the section
         key_points: Optional list of key points from the section
+        entities: Optional list of entities discussed in this section
+                 Format: [{"name": "entity_name", 
+                          "relation_type": "discusses",
+                          "notes": "optional notes"}]
         
     Returns:
         Dictionary containing the operation results
@@ -309,6 +348,7 @@ def track_reading_progress(
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
+            # First track the reading progress as before
             cursor.execute("""
                 INSERT OR REPLACE INTO section_progress
                 (literature_id, section_name, status, key_points, last_updated)
@@ -316,8 +356,34 @@ def track_reading_progress(
             """, [lit_id.full_id, section.lower(), status, 
                  '\n- '.join(key_points) if key_points else None])
             
+            # Then link entities if provided
+            if entities:
+                for entity in entities:
+                    # Validate relation type
+                    relation_type = entity.get('relation_type', 'discusses')
+                    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+                        raise ValueError(f"Invalid relation type '{relation_type}'. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
+                    
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO literature_entity_links
+                        (literature_id, entity_name, relation_type, context, notes)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, [
+                        lit_id.full_id,
+                        entity['name'],
+                        relation_type,
+                        section.lower(),  # Use section as context
+                        entity.get('notes')
+                    ])
+            
             conn.commit()
-            return {"status": "success", "literature_id": lit_id.full_id, "section": section}
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "section": section,
+                "entities_linked": len(entities) if entities else 0
+            }
+            
         except sqlite3.Error as e:
             conn.rollback()
             raise ValueError(f"SQLite error: {str(e)}")
@@ -1029,6 +1095,70 @@ def remove_entity_link(
             }
         except sqlite3.Error as e:
             conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def get_entities_by_context(
+    id_str: str,
+    context_type: Optional[str] = None  # 'section_name' or 'note_type'
+) -> Dict[str, Any]:
+    """Get entities linked to a paper, organized by context.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        context_type: Optional filter for specific context type
+                     'section_name' for section-based entities
+                     'note_type' for note-based entities
+        
+    Returns:
+        Dictionary containing entities grouped by context
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            query = """
+                SELECT context, entity_name, relation_type, notes, created_at
+                FROM literature_entity_links
+                WHERE literature_id = ?
+            """
+            params = [lit_id.full_id]
+            
+            if context_type:
+                if context_type == 'section_name':
+                    query += " AND context IN ({})".format(
+                        ','.join('?' * len(LiteratureIdentifier.VALID_SECTIONS))
+                    )
+                    params.extend(LiteratureIdentifier.VALID_SECTIONS)
+                elif context_type == 'note_type':
+                    query += " AND context LIKE '%_notes'"
+                else:
+                    raise ValueError("Invalid context_type. Use 'section_name' or 'note_type'")
+            
+            query += " ORDER BY context, created_at DESC"
+            
+            cursor.execute(query, params)
+            
+            # Group results by context
+            results = {}
+            for row in cursor.fetchall():
+                context = row['context']
+                if context not in results:
+                    results[context] = []
+                results[context].append({
+                    'entity': row['entity_name'],
+                    'relation_type': row['relation_type'],
+                    'notes': row['notes'],
+                    'created_at': row['created_at']
+                })
+            
+            return {
+                "literature_id": lit_id.full_id,
+                "contexts": results
+            }
+            
+        except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
 if __name__ == "__main__":
