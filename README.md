@@ -1,173 +1,218 @@
-# literateMCP
+# Literature Management System
 
-A FastMCP server for managing academic literature with structured note-taking and organization, designed for seamless interaction with Claude. Built with SQLite for simplicity and portability.
+A powerful system for managing research papers and integrating with knowledge graphs.
 
 ## Features
 
-- Source-agnostic literature tracking (arXiv, DOI, Semantic Scholar, custom)
-- Structured note-taking system with categorized notes (summary, critique, implementation, future work)
-- Section-by-section reading progress tracking
-- Collections and tags for flexible organization
-- Literature relationship mapping (cites, extends, contradicts, similar_to)
-- Comprehensive statistics and progress tracking
-- SQLite-based for simplicity and portability
+### Core Features
 
-## Setup
+- Flexible paper identifier system supporting multiple sources
+- Structured note-taking and progress tracking
+- Tag and collection management
+- Customizable importance ratings
 
-1. Requirements:
+### Entity-Memory Integration
 
-   - Python 3.8+
-   - FastMCP
-   - SQLite3
+- Link papers to knowledge graph entities
+- Track entity evolution through literature
+- Identify research gaps and opportunities
+- Memory graph synchronization
 
-2. Installation:
+### Research Support
 
-   ```bash
-   # Clone repository
-   git clone https://github.com/yourusername/literateMCP
-   cd literateMCP
+- Complex entity pattern search
+- Timeline analysis
+- Research gap identification
+- Entity relationship tracking
 
-   # Install dependencies
-   pip install fastmcp sqlite3
+## Quick Start
 
-   # Create database
-   sqlite3 literature.db < schema.sql
+1. Install dependencies:
 
-   # Set database path
-   export SQLITE_DB_PATH=/path/to/literature.db
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-## Usage with Claude
+2. Initialize the database:
 
-### Literature Management
+```bash
+python create_literature_db.py
+```
+
+3. Start the server:
+
+```bash
+python sqlite-paper-fastmcp-server.py
+```
+
+## Entity Linking Workflows
+
+### 1. Basic Paper-Entity Linking
+
+Link entities while reading a paper:
 
 ```python
-# Add new literature
-add_literature("arxiv:2312.12456", importance=4, tags=["ml", "transformers"])
-
-# Add structured notes
-update_literature_notes(
-    "arxiv:2312.12456",
-    note_type="summary",
-    content="Novel approach to attention mechanisms..."
-)
-
-# Track reading progress
 track_reading_progress(
     "arxiv:2312.12456",
     section="methods",
     status="completed",
-    key_points=["Innovative architecture", "Strong empirical results"]
+    entities=[
+        {"name": "transformer", "relation_type": "introduces"},
+        {"name": "attention", "relation_type": "discusses"}
+    ]
 )
+```
 
-# Add relationships
-add_literature_relation(
+Add notes with entity links:
+
+```python
+update_literature_notes(
     "arxiv:2312.12456",
-    "arxiv:2310.54321",
-    relation_type="extends"
+    note_type="critique",
+    content="The paper introduces a novel approach...",
+    entities=[
+        {
+            "name": "transformer",
+            "relation_type": "evaluates",
+            "notes": "Novel architecture variant"
+        }
+    ]
 )
 ```
 
-### Workflow Examples
+### 2. Research Analysis
 
-1. Adding New Literature:
+Track entity evolution:
 
-```
-Human: "I found an interesting paper on arxiv:2312.12456"
-Claude: Let me help you add that to your database.
-       I'll add it with default importance and you can tell me any specific tags or collections to include.
-       Would you like to start taking notes or tracking your reading progress?
-```
-
-2. Taking Notes:
-
-```
-Human: "Let me tell you the key points from the methodology section"
-Claude: I'll help structure your notes.
-       I'll format them as a METHODS section note with timestamp and store them in a way that's easy to reference later.
-       Would you like me to also update the section's reading progress?
+```python
+track_entity_evolution(
+    "transformer",
+    time_window="2017-2024",
+    include_details=True
+)
 ```
 
-3. Tracking Progress:
+Search papers by entity patterns:
 
-```
-Human: "I've finished reading the introduction"
-Claude: Great! I'll mark the introduction section as completed.
-       Current progress: 2/8 sections completed (25%)
-       Would you like to add any key points from the introduction?
-```
-
-4. Finding Related Papers:
-
-```
-Human: "What papers in my database are related to this?"
-Claude: I'll search for related papers:
-       - 3 papers directly cite this one
-       - 2 papers extend its methodology
-       Here's a summary of each relationship...
+```python
+search_papers_by_entity_patterns([
+    {
+        "entity": "transformer",
+        "relation_type": "introduces"
+    },
+    {
+        "entity": "attention",
+        "context": "methods"
+    }
+], match_mode="all")
 ```
 
-## FastMCP Tools
+Identify research gaps:
 
-### Core Management
+```python
+identify_research_gaps(
+    min_importance=3,
+    include_suggestions=True
+)
+```
 
-- `add_literature(id_str, importance, notes, tags, collections)`: Add new literature
-- `update_literature_status(id_str, status, notes)`: Update reading status
-- `update_literature_notes(id_str, note_type, content, append, timestamp)`: Add/update notes
+### 3. Memory Graph Integration
 
-### Progress Tracking
+Load and validate entities:
 
-- `track_reading_progress(id_str, section, status, key_points)`: Track section progress
-- `get_reading_progress(id_str)`: Get progress for all sections
-- `get_literature_stats(id_str)`: Get comprehensive statistics
+```python
+# Load entities from memory graph
+entities = load_memory_entities("memory_graph.jsonl")
 
-### Organization
+# Validate existing links
+validation = validate_entity_links("memory_graph.jsonl")
 
-- `add_literature_relation(from_id_str, to_id_str, relation_type, notes)`: Track relationships
-- `find_related_literature(id_str, relation_depth, include_notes)`: Find related works
+# Sync with memory graph
+sync_entity_links(
+    "memory_graph.jsonl",
+    auto_remove=False,
+    dry_run=True
+)
+```
 
-## Database Schema
+## Schema Documentation
 
-### Core Tables
+### Literature Entity Links
 
-- `reading_list`: Main literature tracking
-  - `literature_id` (PK), `source`, `status`, `importance`, `notes`
-- `tags`: Literature tags
-- `collections`: Named collections of literature
-- `section_progress`: Section-by-section reading progress
-- `paper_relations`: Literature relationships
+The `literature_entity_links` table tracks relationships between papers and entities:
 
-### Valid Values
+```sql
+CREATE TABLE literature_entity_links (
+    literature_id TEXT,
+    entity_name TEXT,
+    relation_type TEXT,
+    context TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (literature_id, entity_name),
+    FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id)
+);
+```
 
-- Sources: `semanticscholar`, `arxiv`, `doi`, `custom`
-- Sections: `abstract`, `introduction`, `background`, `methods`, `results`, `discussion`, `conclusion`, `appendix`
-- Statuses: `unread`, `reading`, `completed`, `archived`
-- Relations: `cites`, `extends`, `contradicts`, `similar_to`
+#### Relation Types
+
+- `introduces`: Paper introduces or defines the entity
+- `discusses`: Paper discusses or uses the entity
+- `extends`: Paper extends or modifies the entity
+- `evaluates`: Paper evaluates or analyzes the entity
+- `applies`: Paper applies the entity to a problem
+- `critiques`: Paper critiques or identifies issues with the entity
+
+#### Indices
+
+- `idx_entity_name`: Optimize entity-based queries
+- `idx_context`: Optimize context-based filtering
+- `idx_relation_type`: Optimize relation type filtering
 
 ## Best Practices
 
-1. Literature ID Format
+1. Entity Linking
 
-   - Always use `source:id` format (e.g., `arxiv:2312.12456`)
-   - Use `custom:id` for non-standard sources
-   - Be consistent with ID formatting within sources
+   - Link entities as you read each section
+   - Use specific relation types
+   - Add context and notes for clarity
+   - Validate against memory graph regularly
 
-2. Note Organization
+2. Research Analysis
 
-   - Use structured note types for different aspects
-   - Include timestamps for tracking reading progress
-   - Link related concepts across notes
-   - Use key points for quick reference
+   - Start with high-importance papers
+   - Use multiple entity patterns for precision
+   - Consider time windows for evolution analysis
+   - Review research gaps periodically
 
-3. Progress Tracking
+3. Memory Graph Integration
+   - Keep memory graph up to date
+   - Run validation checks regularly
+   - Review sync changes before applying
+   - Document entity relationships
 
-   - Track progress section by section
-   - Add key points while reading
-   - Keep status up to date
-   - Use importance ratings consistently
+## Performance Considerations
 
-4. Relationships
-   - Document why papers are related
-   - Use appropriate relationship types
-   - Add notes to explain relationships
-   - Build a connected knowledge graph
+1. Query Optimization
+
+   - Use appropriate indices
+   - Filter by importance when possible
+   - Limit result sets for large queries
+   - Use pattern search efficiently
+
+2. Memory Usage
+   - Batch large operations
+   - Use pagination for large result sets
+   - Clean up temporary resources
+   - Monitor memory consumption
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new features
+4. Submit a pull request
+
+## License
+
+MIT License
