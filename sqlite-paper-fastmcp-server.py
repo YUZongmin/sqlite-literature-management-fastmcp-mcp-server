@@ -1,7 +1,8 @@
 from pathlib import Path
 import sqlite3
 import os
-from typing import List, Dict, Any, Optional, Tuple
+import json
+from typing import List, Dict, Any, Optional, Tuple, Set
 from fastmcp import FastMCP
 from datetime import datetime
 import re
@@ -1418,6 +1419,244 @@ def find_related_entities(
             
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def load_memory_entities(jsonl_path: str) -> Dict[str, Any]:
+    """Load and validate entities from the memory graph JSONL file.
+    
+    Args:
+        jsonl_path: Path to the memory graph JSONL file
+    
+    Returns:
+        Dict containing valid entities and statistics
+    """
+    try:
+        entities = set()
+        entity_types = {}
+        invalid_entries = []
+        
+        with open(jsonl_path, 'r') as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    if entry.get('type') == 'entity':
+                        name = entry.get('name')
+                        if name:
+                            entities.add(name)
+                            entity_types[name] = entry.get('entityType')
+                        else:
+                            invalid_entries.append(entry)
+                except json.JSONDecodeError:
+                    invalid_entries.append(line.strip())
+        
+        return {
+            "status": "success",
+            "entity_count": len(entities),
+            "entity_types": entity_types,
+            "invalid_count": len(invalid_entries),
+            "entities": sorted(list(entities))
+        }
+    except IOError as e:
+        raise ValueError(f"Error reading memory graph file: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error processing memory graph: {str(e)}")
+
+@mcp.tool()
+def validate_entity_links(jsonl_path: str) -> Dict[str, Any]:
+    """Validate existing entity links against the memory graph.
+    
+    Args:
+        jsonl_path: Path to the memory graph JSONL file
+        
+    Returns:
+        Dictionary containing validation results and any invalid links found
+    """
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Get all unique entities from our links
+            cursor.execute("""
+                SELECT DISTINCT entity_name,
+                       COUNT(DISTINCT literature_id) as usage_count
+                FROM literature_entity_links
+                GROUP BY entity_name
+            """)
+            linked_entities = {row['entity_name']: row['usage_count'] for row in cursor.fetchall()}
+            
+            # Load memory graph entities
+            memory_data = load_memory_entities(jsonl_path)
+            memory_entities = set(memory_data['entities'])
+            
+            # Find discrepancies
+            invalid_entities = set(linked_entities.keys()) - memory_entities
+            
+            # Get affected papers for invalid entities
+            invalid_links = []
+            if invalid_entities:
+                placeholders = ','.join(['?' for _ in invalid_entities])
+                cursor.execute(f"""
+                    SELECT l.entity_name,
+                           GROUP_CONCAT(DISTINCT l.literature_id) as papers,
+                           GROUP_CONCAT(DISTINCT l.relation_type) as relation_types,
+                           COUNT(DISTINCT l.literature_id) as paper_count
+                    FROM literature_entity_links l
+                    WHERE l.entity_name IN ({placeholders})
+                    GROUP BY l.entity_name
+                """, list(invalid_entities))
+                invalid_links = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "total_linked_entities": len(linked_entities),
+                "valid_entities": len(linked_entities) - len(invalid_entities),
+                "invalid_entities": len(invalid_entities),
+                "entity_usage": {
+                    "total_links": sum(linked_entities.values()),
+                    "avg_usage": sum(linked_entities.values()) / len(linked_entities) if linked_entities else 0
+                },
+                "invalid_links": invalid_links,
+                "memory_graph_stats": {
+                    "total_entities": memory_data['entity_count'],
+                    "entity_types": len(set(memory_data['entity_types'].values()))
+                }
+            }
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def sync_entity_links(
+    jsonl_path: str,
+    auto_remove: bool = False,
+    dry_run: bool = True
+) -> Dict[str, Any]:
+    """Synchronize entity links with the memory graph.
+    Can optionally remove invalid links automatically.
+    
+    Args:
+        jsonl_path: Path to the memory graph JSONL file
+        auto_remove: If True, automatically remove invalid links
+        dry_run: If True, only simulate the changes without applying them
+        
+    Returns:
+        Dictionary containing synchronization results and any changes made
+    """
+    validation = validate_entity_links(jsonl_path)
+    
+    if not validation['invalid_entities']:
+        return {
+            "status": "success",
+            "message": "No synchronization needed",
+            "changes": 0
+        }
+    
+    if auto_remove and not dry_run:
+        with SQLiteConnection(DB_PATH) as conn:
+            cursor = conn.cursor()
+            try:
+                # Get details before removal for reporting
+                placeholders = ','.join(['?' for _ in validation['invalid_links']])
+                cursor.execute(f"""
+                    SELECT l.entity_name,
+                           l.literature_id,
+                           l.relation_type,
+                           l.context
+                    FROM literature_entity_links l
+                    WHERE l.entity_name IN ({placeholders})
+                    ORDER BY l.entity_name, l.literature_id
+                """, [link['entity_name'] for link in validation['invalid_links']])
+                
+                removed_links = [dict(row) for row in cursor.fetchall()]
+                
+                # Remove invalid links
+                cursor.execute(f"""
+                    DELETE FROM literature_entity_links
+                    WHERE entity_name IN ({placeholders})
+                """, [link['entity_name'] for link in validation['invalid_links']])
+                
+                changes = cursor.rowcount
+                conn.commit()
+                
+                return {
+                    "status": "success",
+                    "message": f"Removed {changes} invalid links",
+                    "changes": changes,
+                    "removed_links": removed_links,
+                    "affected_papers": len(set(link['literature_id'] for link in removed_links))
+                }
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise ValueError(f"SQLite error: {str(e)}")
+    else:
+        action = "Would remove" if dry_run else "Manual review needed for"
+        return {
+            "status": "review_needed" if not dry_run else "dry_run",
+            "message": f"{action} {validation['invalid_entities']} invalid entities with {sum(link['paper_count'] for link in validation['invalid_links'])} total links",
+            "invalid_links": validation['invalid_links'],
+            "dry_run": dry_run
+        }
+
+@mcp.tool()
+def get_memory_entity_info(
+    jsonl_path: str,
+    entity_name: str
+) -> Dict[str, Any]:
+    """Get detailed information about an entity from the memory graph.
+    
+    Args:
+        jsonl_path: Path to the memory graph JSONL file
+        entity_name: Name of the entity to look up
+        
+    Returns:
+        Dictionary containing entity information and its literature connections
+    """
+    try:
+        # Find entity in memory graph
+        entity_info = None
+        with open(jsonl_path, 'r') as f:
+            for line in f:
+                entry = json.loads(line.strip())
+                if entry.get('type') == 'entity' and entry.get('name') == entity_name:
+                    entity_info = entry
+                    break
+        
+        if not entity_info:
+            raise ValueError(f"Entity '{entity_name}' not found in memory graph")
+        
+        # Get literature connections
+        with SQLiteConnection(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT l.literature_id,
+                       l.relation_type,
+                       l.context,
+                       l.notes,
+                       r.status,
+                       r.importance
+                FROM literature_entity_links l
+                JOIN reading_list r ON l.literature_id = r.literature_id
+                WHERE l.entity_name = ?
+                ORDER BY r.importance DESC, r.last_accessed DESC
+            """, [entity_name])
+            
+            literature_links = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "entity": {
+                    "name": entity_info['name'],
+                    "type": entity_info.get('entityType'),
+                    "attributes": {k: v for k, v in entity_info.items() 
+                                 if k not in ['type', 'name', 'entityType']}
+                },
+                "literature_connections": {
+                    "total_papers": len(literature_links),
+                    "relation_types": list(set(link['relation_type'] for link in literature_links)),
+                    "links": literature_links
+                }
+            }
+            
+    except (IOError, json.JSONDecodeError) as e:
+        raise ValueError(f"Error reading memory graph: {str(e)}")
+    except sqlite3.Error as e:
+        raise ValueError(f"SQLite error: {str(e)}")
 
 if __name__ == "__main__":
     # Start the FastMCP server
