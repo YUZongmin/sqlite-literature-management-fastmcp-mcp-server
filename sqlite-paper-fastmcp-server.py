@@ -10,13 +10,7 @@ import re
 class LiteratureIdentifier:
     """Handles flexible paper identifiers for different sources"""
     VALID_SOURCES = {'semanticscholar', 'arxiv', 'doi', 'custom'}
-    VALID_RELATIONS = {'cites', 'extends', 'contradicts', 'similar_to'}
     VALID_STATUSES = {'unread', 'reading', 'completed', 'archived'}
-    VALID_SECTION_STATUSES = {'not_started', 'in_progress', 'completed'}
-    VALID_SECTIONS = {
-        'abstract', 'introduction', 'background', 'methods', 
-        'results', 'discussion', 'conclusion', 'appendix'
-    }
     VALID_ENTITY_RELATIONS = {
         'discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques'
     }
@@ -79,7 +73,8 @@ def add_literature(
     importance: Optional[int] = 3,
     notes: Optional[str] = None,
     tags: Optional[List[str]] = None,
-    collections: Optional[List[str]] = None
+    source_type: Optional[str] = None,
+    source_url: Optional[str] = None
 ) -> Dict[str, Any]:
     """Add literature to the reading list.
     
@@ -88,21 +83,33 @@ def add_literature(
         importance: Literature importance (1-5)
         notes: Initial notes
         tags: List of tags to apply
-        collections: List of collection names to add the literature to
+        source_type: Type of source ('paper', 'webpage', 'blog', 'video', 'book', 'custom')
+        source_url: URL or direct link to the source
     
     Returns:
         Dictionary containing the operation results
     """
     lit_id = LiteratureIdentifier(id_str)
     
+    # Validate source_type if provided
+    valid_source_types = {'paper', 'webpage', 'blog', 'video', 'book', 'custom'}
+    if source_type and source_type not in valid_source_types:
+        raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
+    
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
-            # Add to reading_list
+            # Add to reading_list with source metadata
             cursor.execute("""
-                INSERT INTO reading_list (literature_id, source, importance, notes)
-                VALUES (?, ?, ?, ?)
-            """, [lit_id.full_id, lit_id.source, importance, notes])
+                INSERT INTO reading_list (
+                    literature_id, source, source_type, source_url,
+                    importance, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [
+                lit_id.full_id, lit_id.source, source_type, source_url,
+                importance, notes
+            ])
             
             # Add tags if provided
             if tags:
@@ -110,23 +117,6 @@ def add_literature(
                     INSERT INTO tags (literature_id, tag)
                     VALUES (?, ?)
                 """, [(lit_id.full_id, tag) for tag in tags])
-            
-            # Add to collections if provided
-            if collections:
-                # First ensure collections exist
-                for collection_name in collections:
-                    cursor.execute("""
-                        INSERT OR IGNORE INTO collections (name)
-                        VALUES (?)
-                    """, [collection_name])
-                    
-                    # Get collection_id and add literature
-                    cursor.execute("""
-                        INSERT INTO collection_items (collection_id, literature_id)
-                        SELECT collection_id, ?
-                        FROM collections
-                        WHERE name = ?
-                    """, [lit_id.full_id, collection_name])
             
             conn.commit()
             return {"status": "success", "literature_id": lit_id.full_id}
@@ -184,22 +174,20 @@ def update_literature_status(
 @mcp.tool()
 def update_literature_notes(
     id_str: str,
-    note_type: str,  # 'summary', 'critique', 'implementation', 'future_work'
     content: str,
-    entities: Optional[List[Dict[str, str]]] = None,  # New parameter
-    append: bool = True,  # if True, append to existing notes, if False, replace
-    timestamp: bool = True  # if True, add timestamp to note
+    entities: Optional[List[Dict[str, str]]] = None,
+    append: bool = True,
+    timestamp: bool = True
 ) -> Dict[str, Any]:
-    """Update structured notes for literature with entity linking.
+    """Update literature notes with optional entity linking.
     
     Args:
         id_str: Literature ID in format "source:id"
-        note_type: Type of note ('summary', 'critique', 'implementation', 'future_work')
         content: Note content
         entities: Optional list of entities mentioned in these notes
                  Format: [{"name": "entity_name", 
                           "relation_type": "discusses",
-                          "notes": "from [note_type] notes: [context]"}]
+                          "notes": "optional notes"}]
         append: If True, append to existing notes, if False, replace
         timestamp: If True, add timestamp to note
     
@@ -220,20 +208,14 @@ def update_literature_notes(
             existing_notes = result['notes'] or ""
             
             # Format new note
-            formatted_note = f"\n\n### {note_type.upper()}"
+            formatted_note = f"\n\n"
             if timestamp:
-                formatted_note += f" ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
-            formatted_note += f"\n{content}"
-            
-            if append:
-                new_notes = existing_notes + formatted_note
-            else:
-                # Replace existing notes of same type if any
-                pattern = f"\n\n### {note_type.upper()}.*?(?=\n\n### |$)"
-                new_notes = re.sub(pattern, "", existing_notes, flags=re.DOTALL)
-                new_notes += formatted_note
+                formatted_note += f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}]\n"
+            formatted_note += content
             
             # Update notes
+            new_notes = existing_notes + formatted_note if append else formatted_note
+            
             cursor.execute("""
                 UPDATE reading_list 
                 SET notes = ?, last_accessed = CURRENT_TIMESTAMP
@@ -248,132 +230,14 @@ def update_literature_notes(
                     if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
                         raise ValueError(f"Invalid relation type '{relation_type}'. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
                     
-                    # Create context from note type
-                    context = f"{note_type.lower()}_notes"
-                    notes = entity.get('notes') or f"Mentioned in {note_type.lower()} notes"
-                    
                     cursor.execute("""
                         INSERT OR REPLACE INTO literature_entity_links
-                        (literature_id, entity_name, relation_type, context, notes)
-                        VALUES (?, ?, ?, ?, ?)
+                        (literature_id, entity_name, relation_type, notes)
+                        VALUES (?, ?, ?, ?)
                     """, [
                         lit_id.full_id,
                         entity['name'],
                         relation_type,
-                        context,
-                        notes
-                    ])
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entities_linked": len(entities) if entities else 0
-            }
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def add_literature_relation(
-    from_id_str: str,
-    to_id_str: str,
-    relation_type: str,  # 'cites', 'extends', 'contradicts', 'similar_to'
-    notes: Optional[str] = None
-) -> Dict[str, Any]:
-    """Track relationships between literature.
-    
-    Args:
-        from_id_str: Source literature ID in format "source:id"
-        to_id_str: Target literature ID in format "source:id"
-        relation_type: Type of relationship
-        notes: Optional notes about the relationship
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    from_lit = LiteratureIdentifier(from_id_str)
-    to_lit = LiteratureIdentifier(to_id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO paper_relations 
-                (from_literature_id, to_literature_id, relation_type, notes)
-                VALUES (?, ?, ?, ?)
-            """, [from_lit.full_id, to_lit.full_id, relation_type, notes])
-            
-            conn.commit()
-            return {"status": "success", "relation": {
-                "from": from_lit.full_id,
-                "to": to_lit.full_id,
-                "type": relation_type
-            }}
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def track_reading_progress(
-    id_str: str,
-    section: str,
-    status: str,
-    key_points: Optional[List[str]] = None,
-    entities: Optional[List[Dict[str, str]]] = None
-) -> Dict[str, Any]:
-    """Track detailed reading progress by section.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        section: Section name
-        status: Reading status for the section
-        key_points: Optional list of key points from the section
-        entities: Optional list of entities discussed in this section
-                 Format: [{"name": "entity_name", 
-                          "relation_type": "discusses",
-                          "notes": "optional notes"}]
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Validate section and status
-    if section.lower() not in LiteratureIdentifier.VALID_SECTIONS:
-        raise ValueError(f"Invalid section. Valid sections: {', '.join(LiteratureIdentifier.VALID_SECTIONS)}")
-    if status not in LiteratureIdentifier.VALID_SECTION_STATUSES:
-        raise ValueError(f"Invalid status. Valid statuses: {', '.join(LiteratureIdentifier.VALID_SECTION_STATUSES)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # First track the reading progress as before
-            cursor.execute("""
-                INSERT OR REPLACE INTO section_progress
-                (literature_id, section_name, status, key_points, last_updated)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-            """, [lit_id.full_id, section.lower(), status, 
-                 '\n- '.join(key_points) if key_points else None])
-            
-            # Then link entities if provided
-            if entities:
-                for entity in entities:
-                    # Validate relation type
-                    relation_type = entity.get('relation_type', 'discusses')
-                    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-                        raise ValueError(f"Invalid relation type '{relation_type}'. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-                    
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO literature_entity_links
-                        (literature_id, entity_name, relation_type, context, notes)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, [
-                        lit_id.full_id,
-                        entity['name'],
-                        relation_type,
-                        section.lower(),  # Use section as context
                         entity.get('notes')
                     ])
             
@@ -381,7 +245,6 @@ def track_reading_progress(
             return {
                 "status": "success",
                 "literature_id": lit_id.full_id,
-                "section": section,
                 "entities_linked": len(entities) if entities else 0
             }
             
@@ -390,16 +253,58 @@ def track_reading_progress(
             raise ValueError(f"SQLite error: {str(e)}")
 
 @mcp.tool()
-def get_reading_progress(
+def link_paper_to_entity(
     id_str: str,
+    entity_name: str,
+    relation_type: str,
+    notes: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Get reading progress for all sections of a literature.
+    """Create a link between a paper and an entity in the knowledge graph.
+    
+    Args:
+        id_str: Literature ID in format "source:id" 
+        entity_name: Name of the entity to link to
+        relation_type: Type of relationship (discusses, introduces, extends, etc.)
+        notes: Optional notes explaining the relationship
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    # Validate relation type
+    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO literature_entity_links 
+                (literature_id, entity_name, relation_type, notes)
+                VALUES (?, ?, ?, ?)
+            """, [lit_id.full_id, entity_name, relation_type, notes])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name,
+                "relation_type": relation_type
+            }
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def get_paper_entities(id_str: str) -> Dict[str, Any]:
+    """Get all entities linked to a paper.
     
     Args:
         id_str: Literature ID in format "source:id"
         
     Returns:
-        Dictionary containing section progress
+        Dictionary containing the paper's linked entities and their relationships
     """
     lit_id = LiteratureIdentifier(id_str)
     
@@ -407,177 +312,190 @@ def get_reading_progress(
         cursor = conn.cursor()
         try:
             cursor.execute("""
-                SELECT section_name, status, key_points, last_updated
-                FROM section_progress
+                SELECT entity_name, relation_type, notes, created_at
+                FROM literature_entity_links
                 WHERE literature_id = ?
-                ORDER BY last_updated DESC
+                ORDER BY created_at DESC
             """, [lit_id.full_id])
             
             return {
                 "literature_id": lit_id.full_id,
-                "sections": [dict(row) for row in cursor.fetchall()]
+                "entities": [dict(row) for row in cursor.fetchall()]
             }
-            
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
 @mcp.tool()
-def get_literature_stats(
-    id_str: str,
+def get_entity_papers(
+    entity_name: str,
+    status: Optional[str] = None,
+    min_importance: Optional[int] = None,
+    sort_by: str = 'importance'  # 'importance', 'date', 'status'
 ) -> Dict[str, Any]:
-    """Get comprehensive statistics for a piece of literature.
+    """Get all papers linked to an entity with filtering options.
     
     Args:
-        id_str: Literature ID in format "source:id"
+        entity_name: Name of the entity
+        status: Optional filter by paper status
+        min_importance: Optional minimum importance level (1-5)
+        sort_by: Sort results by ('importance', 'date', 'status')
         
     Returns:
-        Dictionary containing statistics including:
-        - Basic info (status, importance)
-        - Reading progress
-        - Related papers count
-        - Tags and collections
+        Dictionary containing the entity's linked papers and their relationships
     """
-    lit_id = LiteratureIdentifier(id_str)
+    # Validate parameters
+    if status and status not in LiteratureIdentifier.VALID_STATUSES:
+        raise ValueError(f"Invalid status. Valid statuses: {', '.join(LiteratureIdentifier.VALID_STATUSES)}")
+    
+    if min_importance and not (1 <= min_importance <= 5):
+        raise ValueError("min_importance must be between 1 and 5")
+    
+    if sort_by not in {'importance', 'date', 'status'}:
+        raise ValueError("sort_by must be one of: 'importance', 'date', 'status'")
     
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
-            # Get basic info
-            cursor.execute("""
-                SELECT status, importance, added_date, last_accessed
-                FROM reading_list
-                WHERE literature_id = ?
-            """, [lit_id.full_id])
-            result = cursor.fetchone()
-            if not result:
-                raise ValueError(f"Literature {lit_id.full_id} not found")
-            basic_info = dict(result)
+            # Build query with filters
+            query = """
+                SELECT l.literature_id, l.relation_type, l.notes,
+                       r.status, r.importance, r.source, r.source_type, r.source_url,
+                       r.added_date, r.last_accessed
+                FROM literature_entity_links l
+                JOIN reading_list r ON l.literature_id = r.literature_id
+                WHERE l.entity_name = ?
+            """
+            params = [entity_name]
             
-            # Get tags
-            cursor.execute("""
-                SELECT GROUP_CONCAT(tag) as tags
-                FROM tags
-                WHERE literature_id = ?
-                GROUP BY literature_id
-            """, [lit_id.full_id])
-            result = cursor.fetchone()
-            tags = result['tags'] if result else None
+            if status:
+                query += " AND r.status = ?"
+                params.append(status)
             
-            # Get collections
-            cursor.execute("""
-                SELECT GROUP_CONCAT(c.name) as collections
-                FROM collection_items ci
-                JOIN collections c ON ci.collection_id = c.collection_id
-                WHERE ci.literature_id = ?
-                GROUP BY ci.literature_id
-            """, [lit_id.full_id])
-            result = cursor.fetchone()
-            collections = result['collections'] if result else None
+            if min_importance:
+                query += " AND r.importance >= ?"
+                params.append(min_importance)
             
-            # Get relations count
-            cursor.execute("""
-                SELECT COUNT(*) as relation_count
-                FROM paper_relations
-                WHERE from_literature_id = ? OR to_literature_id = ?
-            """, [lit_id.full_id, lit_id.full_id])
-            relations = cursor.fetchone()['relation_count']
+            # Add sorting
+            query += {
+                'importance': ' ORDER BY r.importance DESC, r.last_accessed DESC',
+                'date': ' ORDER BY r.last_accessed DESC, r.importance DESC',
+                'status': ' ORDER BY r.status, r.importance DESC'
+            }[sort_by]
             
-            # Get reading progress
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_sections,
-                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_sections
-                FROM section_progress
-                WHERE literature_id = ?
-            """, [lit_id.full_id])
-            progress = dict(cursor.fetchone())
+            cursor.execute(query, params)
+            papers = [dict(row) for row in cursor.fetchall()]
             
             return {
-                "literature_id": lit_id.full_id,
-                "basic_info": basic_info,
-                "tags": tags.split(',') if tags else [],
-                "collections": collections.split(',') if collections else [],
-                "relation_count": relations,
-                "reading_progress": {
-                    "total_sections": progress['total_sections'],
-                    "completed_sections": progress['completed_sections'],
-                    "completion_percentage": (
-                        (progress['completed_sections'] / progress['total_sections'] * 100)
-                        if progress['total_sections'] > 0 else 0
-                    )
-                }
+                "entity": entity_name,
+                "total_papers": len(papers),
+                "filters_applied": {
+                    "status": status,
+                    "min_importance": min_importance,
+                    "sort_by": sort_by
+                },
+                "papers": papers
             }
-            
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
 @mcp.tool()
-def find_related_literature(
+def update_entity_link(
     id_str: str,
-    relation_depth: int = 1,  # How many levels of relationships to traverse
-    include_notes: bool = True
-) -> List[Dict[str, Any]]:
-    """Find literature related to the given one through tracked relationships.
+    entity_name: str,
+    relation_type: Optional[str] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update an existing link between a paper and an entity.
     
     Args:
         id_str: Literature ID in format "source:id"
-        relation_depth: How many levels of relationships to traverse
-        include_notes: Whether to include notes in results
+        entity_name: Name of the entity
+        relation_type: Optional new relationship type
+        notes: Optional new notes
         
     Returns:
-        List of dictionaries containing related literature and their relationships
+        Dictionary containing the operation results
     """
     lit_id = LiteratureIdentifier(id_str)
+    
+    # Validate relation type if provided
+    if relation_type and relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
     
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
-            # Recursive CTE to get related literature
+            # Build update query dynamically based on provided fields
+            updates = []
+            params = []
+            
+            if relation_type:
+                updates.append("relation_type = ?")
+                params.append(relation_type)
+            if notes is not None:
+                updates.append("notes = ?")
+                params.append(notes)
+                
+            if not updates:
+                raise ValueError("No updates provided")
+                
+            params.extend([lit_id.full_id, entity_name])
+            
             query = f"""
-            WITH RECURSIVE related_literature AS (
-                -- Base case: direct relationships
-                SELECT 
-                    CASE 
-                        WHEN from_literature_id = ? THEN to_literature_id 
-                        ELSE from_literature_id 
-                    END as related_id,
-                    relation_type,
-                    1 as depth
-                FROM paper_relations
-                WHERE from_literature_id = ? OR to_literature_id = ?
-                
-                UNION ALL
-                
-                -- Recursive case
-                SELECT 
-                    CASE 
-                        WHEN pr.from_literature_id = rl.related_id THEN pr.to_literature_id
-                        ELSE pr.from_literature_id
-                    END,
-                    pr.relation_type,
-                    rl.depth + 1
-                FROM paper_relations pr
-                JOIN related_literature rl ON 
-                    pr.from_literature_id = rl.related_id OR 
-                    pr.to_literature_id = rl.related_id
-                WHERE rl.depth < ?
-            )
-            SELECT DISTINCT 
-                r.literature_id,
-                r.source,
-                r.status,
-                rl.relation_type,
-                rl.depth
-                {', r.notes' if include_notes else ''}
-            FROM related_literature rl
-            JOIN reading_list r ON r.literature_id = rl.related_id
-            ORDER BY rl.depth, r.literature_id
+                UPDATE literature_entity_links 
+                SET {', '.join(updates)}
+                WHERE literature_id = ? AND entity_name = ?
             """
             
-            cursor.execute(query, [lit_id.full_id, lit_id.full_id, lit_id.full_id, relation_depth])
-            return [dict(row) for row in cursor.fetchall()]
+            cursor.execute(query, params)
+            if cursor.rowcount == 0:
+                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
             
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name
+            }
         except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def remove_entity_link(
+    id_str: str,
+    entity_name: str
+) -> Dict[str, Any]:
+    """Remove a link between a paper and an entity.
+    
+    Args:
+        id_str: Literature ID in format "source:id"
+        entity_name: Name of the entity
+        
+    Returns:
+        Dictionary containing the operation results
+    """
+    lit_id = LiteratureIdentifier(id_str)
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                DELETE FROM literature_entity_links
+                WHERE literature_id = ? AND entity_name = ?
+            """, [lit_id.full_id, entity_name])
+            
+            if cursor.rowcount == 0:
+                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entity": entity_name
+            }
+        except sqlite3.Error as e:
+            conn.rollback()
             raise ValueError(f"SQLite error: {str(e)}")
 
 # Include original tools for completeness
@@ -886,1183 +804,60 @@ def backup_database(backup_path: str) -> Dict[str, Any]:
         raise ValueError(f"Backup error: {str(e)}")
 
 @mcp.tool()
-def link_paper_to_entity(
+def bulk_link_entities(
     id_str: str,
-    entity_name: str,
-    relation_type: str,
-    context: Optional[str] = None,
-    notes: Optional[str] = None
+    entities: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
-    """Create a link between a paper and an entity in the knowledge graph.
-    
-    Args:
-        id_str: Literature ID in format "source:id" 
-        entity_name: Name of the entity to link to
-        relation_type: Type of relationship (discusses, introduces, extends, etc.)
-        context: Optional section/part of paper where entity is discussed
-        notes: Optional notes explaining the relationship
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Validate relation type
-    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO literature_entity_links 
-                (literature_id, entity_name, relation_type, context, notes)
-                VALUES (?, ?, ?, ?, ?)
-            """, [lit_id.full_id, entity_name, relation_type, context, notes])
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name,
-                "relation_type": relation_type
-            }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def get_paper_entities(id_str: str) -> Dict[str, Any]:
-    """Get all entities linked to a paper.
+    """Create multiple entity links for a paper in a single transaction.
     
     Args:
         id_str: Literature ID in format "source:id"
-        
-    Returns:
-        Dictionary containing the paper's linked entities and their relationships
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT entity_name, relation_type, context, notes, created_at
-                FROM literature_entity_links
-                WHERE literature_id = ?
-                ORDER BY created_at DESC
-            """, [lit_id.full_id])
-            
-            return {
-                "literature_id": lit_id.full_id,
-                "entities": [dict(row) for row in cursor.fetchall()]
-            }
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def get_entity_papers(entity_name: str) -> Dict[str, Any]:
-    """Get all papers linked to an entity.
-    
-    Args:
-        entity_name: Name of the entity
-        
-    Returns:
-        Dictionary containing the entity's linked papers and their relationships
-    """
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT l.literature_id, l.relation_type, l.context, l.notes,
-                       r.status, r.importance, r.source,
-                       l.created_at
-                FROM literature_entity_links l
-                JOIN reading_list r ON l.literature_id = r.literature_id
-                WHERE l.entity_name = ?
-                ORDER BY r.importance DESC, r.last_accessed DESC
-            """, [entity_name])
-            
-            return {
-                "entity": entity_name,
-                "papers": [dict(row) for row in cursor.fetchall()]
-            }
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def update_entity_link(
-    id_str: str,
-    entity_name: str,
-    relation_type: Optional[str] = None,
-    context: Optional[str] = None,
-    notes: Optional[str] = None
-) -> Dict[str, Any]:
-    """Update an existing link between a paper and an entity.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        entity_name: Name of the entity
-        relation_type: Optional new relationship type
-        context: Optional new context
-        notes: Optional new notes
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Validate relation type if provided
-    if relation_type and relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Build update query dynamically based on provided fields
-            updates = []
-            params = []
-            
-            if relation_type:
-                updates.append("relation_type = ?")
-                params.append(relation_type)
-            if context is not None:
-                updates.append("context = ?")
-                params.append(context)
-            if notes is not None:
-                updates.append("notes = ?")
-                params.append(notes)
-                
-            if not updates:
-                raise ValueError("No updates provided")
-                
-            params.extend([lit_id.full_id, entity_name])
-            
-            query = f"""
-                UPDATE literature_entity_links 
-                SET {', '.join(updates)}
-                WHERE literature_id = ? AND entity_name = ?
-            """
-            
-            cursor.execute(query, params)
-            if cursor.rowcount == 0:
-                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name
-            }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def remove_entity_link(
-    id_str: str,
-    entity_name: str
-) -> Dict[str, Any]:
-    """Remove a link between a paper and an entity.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        entity_name: Name of the entity
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                DELETE FROM literature_entity_links
-                WHERE literature_id = ? AND entity_name = ?
-            """, [lit_id.full_id, entity_name])
-            
-            if cursor.rowcount == 0:
-                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name
-            }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def get_entities_by_context(
-    id_str: str,
-    context_type: Optional[str] = None  # 'section_name' or 'note_type'
-) -> Dict[str, Any]:
-    """Get entities linked to a paper, organized by context.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        context_type: Optional filter for specific context type
-                     'section_name' for section-based entities
-                     'note_type' for note-based entities
-        
-    Returns:
-        Dictionary containing entities grouped by context
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            query = """
-                SELECT context, entity_name, relation_type, notes, created_at
-                FROM literature_entity_links
-                WHERE literature_id = ?
-            """
-            params = [lit_id.full_id]
-            
-            if context_type:
-                if context_type == 'section_name':
-                    query += " AND context IN ({})".format(
-                        ','.join('?' * len(LiteratureIdentifier.VALID_SECTIONS))
-                    )
-                    params.extend(LiteratureIdentifier.VALID_SECTIONS)
-                elif context_type == 'note_type':
-                    query += " AND context LIKE '%_notes'"
-                else:
-                    raise ValueError("Invalid context_type. Use 'section_name' or 'note_type'")
-            
-            query += " ORDER BY context, created_at DESC"
-            
-            cursor.execute(query, params)
-            
-            # Group results by context
-            results = {}
-            for row in cursor.fetchall():
-                context = row['context']
-                if context not in results:
-                    results[context] = []
-                results[context].append({
-                    'entity': row['entity_name'],
-                    'relation_type': row['relation_type'],
-                    'notes': row['notes'],
-                    'created_at': row['created_at']
-                })
-            
-            return {
-                "literature_id": lit_id.full_id,
-                "contexts": results
-            }
-            
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def find_papers_by_entities(
-    entity_names: List[str],
-    match_type: str = 'any',  # 'any', 'all', 'exact'
-    relation_types: Optional[List[str]] = None
-) -> Dict[str, Any]:
-    """Find papers that are linked to specified entities.
-    
-    Args:
-        entity_names: List of entity names to search for
-        match_type: How to match entities:
-                   'any' - papers linked to any of the entities
-                   'all' - papers linked to all entities
-                   'exact' - papers linked to exactly these entities
-        relation_types: Optional list of relation types to filter by
-        
-    Returns:
-        Dictionary containing matching papers and statistics
-    """
-    # Validate match_type
-    if match_type not in {'any', 'all', 'exact'}:
-        raise ValueError("match_type must be one of: 'any', 'all', 'exact'")
-    
-    # Validate relation_types if provided
-    if relation_types:
-        invalid_types = set(relation_types) - LiteratureIdentifier.VALID_ENTITY_RELATIONS
-        if invalid_types:
-            raise ValueError(f"Invalid relation types: {', '.join(invalid_types)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            if match_type == 'any':
-                query = """
-                    SELECT DISTINCT 
-                        r.*,
-                        COUNT(l.entity_name) as match_count,
-                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
-                    FROM reading_list r
-                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                    WHERE l.entity_name IN ({})
-                    {}
-                    GROUP BY r.literature_id
-                    ORDER BY match_count DESC, r.importance DESC
-                """.format(
-                    ','.join(['?'] * len(entity_names)),
-                    "AND l.relation_type IN ({})".format(
-                        ','.join(['?'] * len(relation_types))
-                    ) if relation_types else ""
-                )
-                params = entity_names + (relation_types or [])
-                
-            elif match_type == 'all':
-                query = """
-                    SELECT 
-                        r.*,
-                        COUNT(DISTINCT l.entity_name) as match_count,
-                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
-                    FROM reading_list r
-                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                    WHERE l.entity_name IN ({})
-                    {}
-                    GROUP BY r.literature_id
-                    HAVING match_count = ?
-                    ORDER BY r.importance DESC
-                """.format(
-                    ','.join(['?'] * len(entity_names)),
-                    "AND l.relation_type IN ({})".format(
-                        ','.join(['?'] * len(relation_types))
-                    ) if relation_types else ""
-                )
-                params = entity_names + (relation_types or []) + [len(entity_names)]
-            
-            else:  # exact
-                query = """
-                    WITH PaperEntityCounts AS (
-                        SELECT 
-                            r.literature_id,
-                            COUNT(DISTINCT l.entity_name) as total_entities
-                        FROM reading_list r
-                        JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                        GROUP BY r.literature_id
-                    )
-                    SELECT 
-                        r.*,
-                        COUNT(DISTINCT l.entity_name) as match_count,
-                        GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities
-                    FROM reading_list r
-                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                    JOIN PaperEntityCounts pec ON r.literature_id = pec.literature_id
-                    WHERE l.entity_name IN ({})
-                    {}
-                    GROUP BY r.literature_id
-                    HAVING match_count = ? AND pec.total_entities = ?
-                    ORDER BY r.importance DESC
-                """.format(
-                    ','.join(['?'] * len(entity_names)),
-                    "AND l.relation_type IN ({})".format(
-                        ','.join(['?'] * len(relation_types))
-                    ) if relation_types else ""
-                )
-                params = entity_names + (relation_types or []) + [len(entity_names), len(entity_names)]
-            
-            cursor.execute(query, params)
-            papers = [dict(row) for row in cursor.fetchall()]
-            
-            return {
-                "match_type": match_type,
-                "entity_count": len(entity_names),
-                "papers_found": len(papers),
-                "papers": papers
-            }
-            
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def analyze_entity_coverage() -> Dict[str, Any]:
-    """Analyze how entities are covered across the literature database.
-    Returns statistics about entity coverage and potential gaps.
-    
-    Returns:
-        Dictionary containing entity coverage statistics and analysis
-    """
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Get entity statistics
-            cursor.execute("""
-                WITH EntityStats AS (
-                    SELECT 
-                        entity_name,
-                        COUNT(DISTINCT literature_id) as paper_count,
-                        GROUP_CONCAT(DISTINCT relation_type) as relation_types,
-                        COUNT(DISTINCT context) as context_count,
-                        GROUP_CONCAT(DISTINCT context) as contexts
-                    FROM literature_entity_links
-                    GROUP BY entity_name
-                )
-                SELECT 
-                    entity_name,
-                    paper_count,
-                    relation_types,
-                    context_count,
-                    contexts,
-                    CASE 
-                        WHEN paper_count < 2 THEN 'low_coverage'
-                        WHEN paper_count < 5 THEN 'medium_coverage'
-                        ELSE 'well_covered'
-                    END as coverage_level
-                FROM EntityStats
-                ORDER BY paper_count DESC, entity_name
-            """)
-            
-            entity_stats = [dict(row) for row in cursor.fetchall()]
-            
-            # Get overview statistics
-            overview = {
-                "total_entities": len(entity_stats),
-                "coverage_distribution": {
-                    "low_coverage": len([e for e in entity_stats if e['coverage_level'] == 'low_coverage']),
-                    "medium_coverage": len([e for e in entity_stats if e['coverage_level'] == 'medium_coverage']),
-                    "well_covered": len([e for e in entity_stats if e['coverage_level'] == 'well_covered'])
-                },
-                "context_stats": {
-                    "avg_contexts_per_entity": sum(e['context_count'] for e in entity_stats) / len(entity_stats) if entity_stats else 0,
-                    "single_context_entities": len([e for e in entity_stats if e['context_count'] == 1])
-                }
-            }
-            
-            return {
-                "overview": overview,
-                "entity_stats": entity_stats
-            }
-            
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def find_related_entities(
-    literature_id: Optional[str] = None,
-    entity_name: Optional[str] = None,
-    min_co_occurrences: int = 1
-) -> Dict[str, Any]:
-    """Find entities that frequently appear together.
-    Can search based on either a paper or another entity.
-    
-    Args:
-        literature_id: Optional paper ID to find related entities
-        entity_name: Optional entity name to find related entities
-        min_co_occurrences: Minimum number of co-occurrences required
-        
-    Returns:
-        Dictionary containing related entities and their relationships
-    """
-    if not (literature_id or entity_name):
-        raise ValueError("Must provide either literature_id or entity_name")
-    
-    if literature_id and entity_name:
-        raise ValueError("Cannot provide both literature_id and entity_name")
-        
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            if literature_id:
-                lit_id = LiteratureIdentifier(literature_id)
-                # Find entities related through the same paper
-                query = """
-                    SELECT 
-                        l2.entity_name,
-                        l2.relation_type,
-                        l2.context,
-                        l2.notes,
-                        COUNT(*) as co_occurrence_count
-                    FROM literature_entity_links l1
-                    JOIN literature_entity_links l2 
-                        ON l1.literature_id = l2.literature_id
-                        AND l1.entity_name != l2.entity_name
-                    WHERE l1.literature_id = ?
-                    GROUP BY l2.entity_name, l2.relation_type, l2.context
-                    HAVING co_occurrence_count >= ?
-                    ORDER BY co_occurrence_count DESC, l2.entity_name
-                """
-                params = [lit_id.full_id, min_co_occurrences]
-            else:
-                # Find entities that frequently appear with the given entity
-                query = """
-                    SELECT 
-                        l2.entity_name,
-                        GROUP_CONCAT(DISTINCT l2.relation_type) as relation_types,
-                        COUNT(DISTINCT l1.literature_id) as shared_papers,
-                        GROUP_CONCAT(DISTINCT l2.context) as contexts,
-                        GROUP_CONCAT(DISTINCT l2.notes) as notes
-                    FROM literature_entity_links l1
-                    JOIN literature_entity_links l2 
-                        ON l1.literature_id = l2.literature_id
-                        AND l1.entity_name != l2.entity_name
-                    WHERE l1.entity_name = ?
-                    GROUP BY l2.entity_name
-                    HAVING shared_papers >= ?
-                    ORDER BY shared_papers DESC, l2.entity_name
-                """
-                params = [entity_name, min_co_occurrences]
-            
-            cursor.execute(query, params)
-            related_entities = [dict(row) for row in cursor.fetchall()]
-            
-            return {
-                "source_type": "paper" if literature_id else "entity",
-                "source": literature_id or entity_name,
-                "min_co_occurrences": min_co_occurrences,
-                "related_count": len(related_entities),
-                "related_entities": related_entities
-            }
-            
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def load_memory_entities(jsonl_path: str) -> Dict[str, Any]:
-    """Load and validate entities from the memory graph JSONL file.
-    
-    Args:
-        jsonl_path: Path to the memory graph JSONL file
-    
-    Returns:
-        Dict containing valid entities and statistics
-    """
-    try:
-        entities = set()
-        entity_types = {}
-        invalid_entries = []
-        
-        with open(jsonl_path, 'r') as f:
-            for line in f:
-                try:
-                    entry = json.loads(line.strip())
-                    if entry.get('type') == 'entity':
-                        name = entry.get('name')
-                        if name:
-                            entities.add(name)
-                            entity_types[name] = entry.get('entityType')
-                        else:
-                            invalid_entries.append(entry)
-                except json.JSONDecodeError:
-                    invalid_entries.append(line.strip())
-        
-        return {
-            "status": "success",
-            "entity_count": len(entities),
-            "entity_types": entity_types,
-            "invalid_count": len(invalid_entries),
-            "entities": sorted(list(entities))
-        }
-    except IOError as e:
-        raise ValueError(f"Error reading memory graph file: {str(e)}")
-    except Exception as e:
-        raise ValueError(f"Unexpected error processing memory graph: {str(e)}")
-
-@mcp.tool()
-def validate_entity_links(jsonl_path: str) -> Dict[str, Any]:
-    """Validate existing entity links against the memory graph.
-    
-    Args:
-        jsonl_path: Path to the memory graph JSONL file
-        
-    Returns:
-        Dictionary containing validation results and any invalid links found
-    """
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Get all unique entities from our links
-            cursor.execute("""
-                SELECT DISTINCT entity_name,
-                       COUNT(DISTINCT literature_id) as usage_count
-                FROM literature_entity_links
-                GROUP BY entity_name
-            """)
-            linked_entities = {row['entity_name']: row['usage_count'] for row in cursor.fetchall()}
-            
-            # Load memory graph entities
-            memory_data = load_memory_entities(jsonl_path)
-            memory_entities = set(memory_data['entities'])
-            
-            # Find discrepancies
-            invalid_entities = set(linked_entities.keys()) - memory_entities
-            
-            # Get affected papers for invalid entities
-            invalid_links = []
-            if invalid_entities:
-                placeholders = ','.join(['?' for _ in invalid_entities])
-                cursor.execute(f"""
-                    SELECT l.entity_name,
-                           GROUP_CONCAT(DISTINCT l.literature_id) as papers,
-                           GROUP_CONCAT(DISTINCT l.relation_type) as relation_types,
-                           COUNT(DISTINCT l.literature_id) as paper_count
-                    FROM literature_entity_links l
-                    WHERE l.entity_name IN ({placeholders})
-                    GROUP BY l.entity_name
-                """, list(invalid_entities))
-                invalid_links = [dict(row) for row in cursor.fetchall()]
-            
-            return {
-                "total_linked_entities": len(linked_entities),
-                "valid_entities": len(linked_entities) - len(invalid_entities),
-                "invalid_entities": len(invalid_entities),
-                "entity_usage": {
-                    "total_links": sum(linked_entities.values()),
-                    "avg_usage": sum(linked_entities.values()) / len(linked_entities) if linked_entities else 0
-                },
-                "invalid_links": invalid_links,
-                "memory_graph_stats": {
-                    "total_entities": memory_data['entity_count'],
-                    "entity_types": len(set(memory_data['entity_types'].values()))
-                }
-            }
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def sync_entity_links(
-    jsonl_path: str,
-    auto_remove: bool = False,
-    dry_run: bool = True
-) -> Dict[str, Any]:
-    """Synchronize entity links with the memory graph.
-    Can optionally remove invalid links automatically.
-    
-    Args:
-        jsonl_path: Path to the memory graph JSONL file
-        auto_remove: If True, automatically remove invalid links
-        dry_run: If True, only simulate the changes without applying them
-        
-    Returns:
-        Dictionary containing synchronization results and any changes made
-    """
-    validation = validate_entity_links(jsonl_path)
-    
-    if not validation['invalid_entities']:
-        return {
-            "status": "success",
-            "message": "No synchronization needed",
-            "changes": 0
-        }
-    
-    if auto_remove and not dry_run:
-        with SQLiteConnection(DB_PATH) as conn:
-            cursor = conn.cursor()
-            try:
-                # Get details before removal for reporting
-                placeholders = ','.join(['?' for _ in validation['invalid_links']])
-                cursor.execute(f"""
-                    SELECT l.entity_name,
-                           l.literature_id,
-                           l.relation_type,
-                           l.context
-                    FROM literature_entity_links l
-                    WHERE l.entity_name IN ({placeholders})
-                    ORDER BY l.entity_name, l.literature_id
-                """, [link['entity_name'] for link in validation['invalid_links']])
-                
-                removed_links = [dict(row) for row in cursor.fetchall()]
-                
-                # Remove invalid links
-                cursor.execute(f"""
-                    DELETE FROM literature_entity_links
-                    WHERE entity_name IN ({placeholders})
-                """, [link['entity_name'] for link in validation['invalid_links']])
-                
-                changes = cursor.rowcount
-                conn.commit()
-                
-                return {
-                    "status": "success",
-                    "message": f"Removed {changes} invalid links",
-                    "changes": changes,
-                    "removed_links": removed_links,
-                    "affected_papers": len(set(link['literature_id'] for link in removed_links))
-                }
-            except sqlite3.Error as e:
-                conn.rollback()
-                raise ValueError(f"SQLite error: {str(e)}")
-    else:
-        action = "Would remove" if dry_run else "Manual review needed for"
-        return {
-            "status": "review_needed" if not dry_run else "dry_run",
-            "message": f"{action} {validation['invalid_entities']} invalid entities with {sum(link['paper_count'] for link in validation['invalid_links'])} total links",
-            "invalid_links": validation['invalid_links'],
-            "dry_run": dry_run
-        }
-
-@mcp.tool()
-def get_memory_entity_info(
-    jsonl_path: str,
-    entity_name: str
-) -> Dict[str, Any]:
-    """Get detailed information about an entity from the memory graph.
-    
-    Args:
-        jsonl_path: Path to the memory graph JSONL file
-        entity_name: Name of the entity to look up
-        
-    Returns:
-        Dictionary containing entity information and its literature connections
-    """
-    try:
-        # Find entity in memory graph
-        entity_info = None
-        with open(jsonl_path, 'r') as f:
-            for line in f:
-                entry = json.loads(line.strip())
-                if entry.get('type') == 'entity' and entry.get('name') == entity_name:
-                    entity_info = entry
-                    break
-        
-        if not entity_info:
-            raise ValueError(f"Entity '{entity_name}' not found in memory graph")
-        
-        # Get literature connections
-        with SQLiteConnection(DB_PATH) as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT l.literature_id,
-                       l.relation_type,
-                       l.context,
-                       l.notes,
-                       r.status,
-                       r.importance
-                FROM literature_entity_links l
-                JOIN reading_list r ON l.literature_id = r.literature_id
-                WHERE l.entity_name = ?
-                ORDER BY r.importance DESC, r.last_accessed DESC
-            """, [entity_name])
-            
-            literature_links = [dict(row) for row in cursor.fetchall()]
-            
-            return {
-                "entity": {
-                    "name": entity_info['name'],
-                    "type": entity_info.get('entityType'),
-                    "attributes": {k: v for k, v in entity_info.items() 
-                                 if k not in ['type', 'name', 'entityType']}
-                },
-                "literature_connections": {
-                    "total_papers": len(literature_links),
-                    "relation_types": list(set(link['relation_type'] for link in literature_links)),
-                    "links": literature_links
-                }
-            }
-            
-    except (IOError, json.JSONDecodeError) as e:
-        raise ValueError(f"Error reading memory graph: {str(e)}")
-    except sqlite3.Error as e:
-        raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def search_papers_by_entity_patterns(
-    patterns: List[Dict[str, Any]],
-    match_mode: str = 'all'  # 'all', 'any'
-) -> Dict[str, Any]:
-    """Search papers by complex entity relationship patterns.
-    
-    Args:
-        patterns: List of pattern dictionaries, each containing:
+        entities: List of entity dictionaries, each containing:
                  {
-                     "entity": str,
-                     "relation_type": Optional[str],
-                     "context": Optional[str],
-                     "importance": Optional[int]  # minimum paper importance
+                     "name": str,
+                     "relation_type": str,
+                     "notes": Optional[str]
                  }
-        match_mode: How to match patterns ('all' or 'any')
-        
+    
     Returns:
-        Dictionary containing search results and matching papers
+        Dictionary containing the operation results
     """
-    if not patterns:
-        raise ValueError("At least one pattern must be provided")
+    lit_id = LiteratureIdentifier(id_str)
     
-    if match_mode not in {'all', 'any'}:
-        raise ValueError("match_mode must be 'all' or 'any'")
+    if not entities:
+        raise ValueError("At least one entity must be provided")
     
-    # Validate patterns
-    for i, pattern in enumerate(patterns):
-        if not pattern.get('entity'):
-            raise ValueError(f"Pattern {i} missing required 'entity' field")
-        if pattern.get('relation_type') and pattern['relation_type'] not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-            raise ValueError(f"Invalid relation_type in pattern {i}")
+    # Validate all entities first
+    for i, entity in enumerate(entities):
+        if not entity.get('name'):
+            raise ValueError(f"Entity {i} missing required 'name' field")
+        relation_type = entity.get('relation_type', 'discusses')
+        if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+            raise ValueError(f"Invalid relation_type '{relation_type}' for entity '{entity['name']}'")
     
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
-            # Build pattern conditions
-            pattern_conditions = []
-            params = []
+            # Prepare batch insert
+            cursor.executemany("""
+                INSERT OR REPLACE INTO literature_entity_links
+                (literature_id, entity_name, relation_type, notes)
+                VALUES (?, ?, ?, ?)
+            """, [
+                (lit_id.full_id, entity['name'], 
+                 entity.get('relation_type', 'discusses'),
+                 entity.get('notes'))
+                for entity in entities
+            ])
             
-            for i, pattern in enumerate(patterns):
-                cond = f"""
-                    EXISTS (
-                        SELECT 1 
-                        FROM literature_entity_links le{i}
-                        WHERE le{i}.literature_id = r.literature_id
-                        AND le{i}.entity_name = ?
-                """
-                params.append(pattern['entity'])
-                
-                if pattern.get('relation_type'):
-                    cond += f" AND le{i}.relation_type = ?"
-                    params.append(pattern['relation_type'])
-                if pattern.get('context'):
-                    cond += f" AND le{i}.context LIKE ?"
-                    params.append(f"%{pattern['context']}%")
-                if pattern.get('importance'):
-                    cond += f" AND r.importance >= ?"
-                    params.append(pattern['importance'])
-                
-                cond += ")"
-                pattern_conditions.append(cond)
-            
-            pattern_conditions = f" {'OR' if match_mode == 'any' else 'AND'} ".join(pattern_conditions)
-            
-            query = f"""
-                WITH MatchedPatterns AS (
-                    SELECT r.literature_id,
-                           COUNT(DISTINCT l.entity_name) as match_count
-                    FROM reading_list r
-                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                    WHERE ({pattern_conditions})
-                    GROUP BY r.literature_id
-                    HAVING match_count >= ?
-                )
-                SELECT r.*,
-                       GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities,
-                       m.match_count,
-                       GROUP_CONCAT(DISTINCT l.relation_type) as relation_types,
-                       GROUP_CONCAT(DISTINCT l.context) as contexts
-                FROM MatchedPatterns m
-                JOIN reading_list r ON r.literature_id = m.literature_id 
-                JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                GROUP BY r.literature_id
-                ORDER BY r.importance DESC, m.match_count DESC
-            """
-            
-            params.append(1 if match_mode == 'any' else len(patterns))
-            
-            try:
-                cursor.execute(query, params)
-                papers = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in search_papers_by_entity_patterns: {str(e)}\nQuery: {query}")
-            
+            conn.commit()
             return {
-                "patterns": patterns,
-                "match_mode": match_mode,
-                "total_matches": len(papers),
-                "match_distribution": {
-                    "by_importance": {str(i): len([p for p in papers if p['importance'] == i]) 
-                                    for i in range(1, 6)},
-                    "by_entity_count": {str(c): len([p for p in papers if p['match_count'] == c]) 
-                                      for c in range(1, max([p['match_count'] for p in papers] + [1]) + 1)}
-                },
-                "papers": papers
+                "status": "success",
+                "literature_id": lit_id.full_id,
+                "entities_linked": len(entities)
             }
-            
         except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def track_entity_evolution(
-    entity_name: str,
-    time_window: Optional[str] = None,  # e.g., "2020-2024"
-    include_details: bool = False
-) -> Dict[str, Any]:
-    """Track how an entity has evolved through papers over time.
-    
-    Args:
-        entity_name: Name of the entity to track
-        time_window: Optional time range in format "YYYY-YYYY"
-        include_details: If True, include detailed paper information
-        
-    Returns:
-        Dictionary containing evolution analysis and timeline
-    """
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            params = [entity_name]
-            time_condition = ""
-            
-            if time_window:
-                try:
-                    start_year, end_year = map(int, time_window.split('-'))
-                    time_condition = "AND CAST(strftime('%Y', r.added_date) as INTEGER) BETWEEN ? AND ?"
-                    params.extend([start_year, end_year])
-                except ValueError:
-                    raise ValueError("time_window must be in format 'YYYY-YYYY'")
-            
-            # Get timeline data with improved query structure
-            query = f"""
-                WITH PaperTimeline AS (
-                    SELECT 
-                        l.literature_id,
-                        l.relation_type,
-                        l.context,
-                        l.notes,
-                        r.added_date,
-                        r.importance,
-                        r.status
-                    FROM literature_entity_links l
-                    JOIN reading_list r ON l.literature_id = r.literature_id
-                    WHERE l.entity_name = ?
-                    {time_condition}
-                ),
-                YearlyStats AS (
-                    SELECT 
-                        strftime('%Y', added_date) as year,
-                        COUNT(*) as paper_count,
-                        GROUP_CONCAT(DISTINCT relation_type) as relation_types,
-                        GROUP_CONCAT(DISTINCT context) as contexts,
-                        AVG(importance) as avg_importance,
-                        GROUP_CONCAT(DISTINCT status) as statuses
-                    FROM PaperTimeline
-                    GROUP BY year
-                )
-                SELECT *
-                FROM YearlyStats
-                ORDER BY year
-            """
-            
-            try:
-                cursor.execute(query, params)
-                timeline = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in track_entity_evolution: {str(e)}\nQuery: {query}")
-            
-            # Get relationship transitions with improved query
-            transition_query = """
-                WITH OrderedPapers AS (
-                    SELECT 
-                        literature_id,
-                        relation_type,
-                        LAG(relation_type) OVER (ORDER BY added_date) as prev_relation,
-                        added_date
-                    FROM PaperTimeline
-                )
-                SELECT 
-                    prev_relation || ' -> ' || relation_type as transition,
-                    COUNT(*) as count,
-                    MIN(added_date) as first_occurrence,
-                    MAX(added_date) as last_occurrence
-                FROM OrderedPapers
-                WHERE prev_relation IS NOT NULL
-                GROUP BY transition
-                ORDER BY count DESC
-            """
-            
-            try:
-                cursor.execute(transition_query)
-                transitions = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in track_entity_evolution (transitions): {str(e)}\nQuery: {transition_query}")
-            
-            # Get detailed paper information if requested
-            details = None
-            if include_details:
-                details_query = f"""
-                    SELECT 
-                        r.literature_id,
-                        r.title,
-                        r.status,
-                        r.importance,
-                        r.added_date,
-                        l.relation_type,
-                        l.context,
-                        l.notes
-                    FROM reading_list r
-                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
-                    WHERE l.entity_name = ?
-                    {time_condition}
-                    ORDER BY r.added_date
-                """
-                
-                try:
-                    cursor.execute(details_query, params)
-                    details = [dict(row) for row in cursor.fetchall()]
-                except sqlite3.Error as e:
-                    raise ValueError(f"Database error in track_entity_evolution (details): {str(e)}\nQuery: {details_query}")
-            
-            return {
-                "entity": entity_name,
-                "time_window": time_window,
-                "timeline": timeline,
-                "transitions": transitions,
-                "total_papers": sum(t['paper_count'] for t in timeline),
-                "evolution_stats": {
-                    "relation_diversity": len(set(t['relation_types'].split(',') for t in timeline)),
-                    "context_diversity": len(set(t['contexts'].split(',') for t in timeline)),
-                    "avg_importance_trend": [float(t['avg_importance']) for t in timeline],
-                    "status_distribution": {status: sum(1 for t in timeline if status in t['statuses'].split(','))
-                                         for status in LiteratureIdentifier.VALID_STATUSES}
-                },
-                "paper_details": details if include_details else None
-            }
-            
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def identify_research_gaps(
-    min_importance: int = 3,
-    min_papers: int = 2,
-    include_suggestions: bool = True
-) -> Dict[str, Any]:
-    """Identify potential research gaps and opportunities.
-    
-    Args:
-        min_importance: Minimum importance level for analysis
-        min_papers: Minimum number of papers for reliable analysis
-        include_suggestions: If True, include research suggestions
-        
-    Returns:
-        Dictionary containing gap analysis and suggestions
-    """
-    if min_importance < 1 or min_importance > 5:
-        raise ValueError("min_importance must be between 1 and 5")
-        
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Find isolated entities with improved query structure
-            entity_query = """
-                WITH EntityStats AS (
-                    SELECT 
-                        l.entity_name,
-                        COUNT(DISTINCT l.context) as context_count,
-                        COUNT(DISTINCT l.literature_id) as paper_count,
-                        GROUP_CONCAT(DISTINCT l.relation_type) as relation_types,
-                        AVG(r.importance) as avg_importance
-                    FROM literature_entity_links l
-                    JOIN reading_list r ON l.literature_id = r.literature_id
-                    WHERE r.importance >= ?
-                    GROUP BY l.entity_name
-                    HAVING paper_count >= ?
-                )
-                SELECT *,
-                    CASE 
-                        WHEN context_count = 1 THEN 'single_context'
-                        WHEN paper_count = 1 THEN 'single_paper'
-                        ELSE 'multiple'
-                    END as coverage_type
-                FROM EntityStats
-                WHERE context_count = 1 OR paper_count = 1
-                ORDER BY paper_count DESC, avg_importance DESC
-            """
-            
-            try:
-                cursor.execute(entity_query, [min_importance, min_papers])
-                isolated_entities = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in identify_research_gaps (entities): {str(e)}\nQuery: {entity_query}")
-            
-            # Find weak connections with improved query
-            pairs_query = """
-                WITH PairStats AS (
-                    SELECT 
-                        l1.entity_name as entity1,
-                        l2.entity_name as entity2,
-                        COUNT(DISTINCT l1.literature_id) as shared_papers,
-                        GROUP_CONCAT(DISTINCT l1.relation_type || ',' || l2.relation_type) as relation_pairs,
-                        AVG(r.importance) as avg_importance
-                    FROM literature_entity_links l1
-                    JOIN literature_entity_links l2 
-                        ON l1.literature_id = l2.literature_id
-                        AND l1.entity_name < l2.entity_name
-                    JOIN reading_list r ON l1.literature_id = r.literature_id
-                    WHERE r.importance >= ?
-                    GROUP BY l1.entity_name, l2.entity_name
-                    HAVING shared_papers >= ?
-                )
-                SELECT *
-                FROM PairStats
-                WHERE shared_papers <= 2
-                ORDER BY avg_importance DESC, shared_papers
-            """
-            
-            try:
-                cursor.execute(pairs_query, [min_importance, min_papers])
-                weak_connections = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in identify_research_gaps (pairs): {str(e)}\nQuery: {pairs_query}")
-            
-            # Find section gaps with improved query
-            sections_query = """
-                WITH PaperSections AS (
-                    SELECT 
-                        l.entity_name,
-                        l.context,
-                        COUNT(DISTINCT l.literature_id) as papers_in_section
-                    FROM literature_entity_links l
-                    JOIN reading_list r ON l.literature_id = r.literature_id
-                    WHERE r.importance >= ?
-                    AND l.context IN (
-                        'abstract', 'introduction', 'background', 'methods',
-                        'results', 'discussion', 'conclusion'
-                    )
-                    GROUP BY l.entity_name, l.context
-                )
-                SELECT 
-                    entity_name,
-                    GROUP_CONCAT(context) as covered_sections,
-                    COUNT(DISTINCT context) as section_coverage,
-                    SUM(papers_in_section) as total_papers
-                FROM PaperSections
-                GROUP BY entity_name
-                HAVING section_coverage < 4
-                ORDER BY section_coverage, total_papers DESC
-            """
-            
-            try:
-                cursor.execute(sections_query, [min_importance])
-                section_gaps = [dict(row) for row in cursor.fetchall()]
-            except sqlite3.Error as e:
-                raise ValueError(f"Database error in identify_research_gaps (sections): {str(e)}\nQuery: {sections_query}")
-            
-            result = {
-                "isolated_entities": isolated_entities,
-                "weak_connections": weak_connections,
-                "section_gaps": section_gaps,
-                "analysis_params": {
-                    "min_importance": min_importance,
-                    "min_papers": min_papers
-                },
-                "statistics": {
-                    "total_gaps": len(isolated_entities) + len(weak_connections) + len(section_gaps),
-                    "by_type": {
-                        "isolated_entities": len(isolated_entities),
-                        "weak_connections": len(weak_connections),
-                        "section_gaps": len(section_gaps)
-                    }
-                }
-            }
-            
-            if include_suggestions:
-                result["research_suggestions"] = [
-                    {
-                        "type": "context_expansion",
-                        "entities": [e['entity_name'] for e in isolated_entities[:5]],
-                        "suggestion": "Consider exploring these entities in different contexts"
-                    },
-                    {
-                        "type": "relationship_investigation",
-                        "entity_pairs": [(w['entity1'], w['entity2']) for w in weak_connections[:5]],
-                        "suggestion": "Investigate potential relationships between these entity pairs"
-                    },
-                    {
-                        "type": "section_coverage",
-                        "entities": [s['entity_name'] for s in section_gaps[:5]],
-                        "suggestion": "Expand coverage of these entities across different paper sections"
-                    }
-                ]
-            
-            return result
-            
-        except sqlite3.Error as e:
+            conn.rollback()
             raise ValueError(f"SQLite error: {str(e)}")
 
 if __name__ == "__main__":
