@@ -25,25 +25,30 @@ A powerful system for managing research papers and integrating with knowledge gr
 - Research gap identification
 - Entity relationship tracking
 
+## Prerequisites
+
+This system integrates with the [MCP Memory Server](https://github.com/modelcontextprotocol/servers/tree/main/src/memory) for persistent knowledge graph storage. You'll need to install and configure it first.
+
 ## Quick Start
 
-1. Install dependencies:
+1. Create a new SQLite database with our schema:
 
 ```bash
-pip install -r requirements.txt
+# Create a new database
+sqlite3 literature.db < create_literature_db.sql
 ```
 
-2. Initialize the database:
+2. Install the literature management server:
 
 ```bash
-python create_literature_db.py
+# Install for Claude Desktop with your database path
+fastmcp install sqlite-paper-fastmcp-server.py --name "Literature Manager" -e LITERATURE_DB_PATH=/path/to/literature.db
+
+# Optional: Configure memory graph path
+fastmcp config set MEMORY_GRAPH_PATH=/path/to/memory.jsonl
 ```
 
-3. Start the server:
-
-```bash
-python sqlite-paper-fastmcp-server.py
-```
+The server integrates with both your literature database and the memory graph, providing a seamless experience for managing research papers and knowledge entities.
 
 ## Entity Linking Workflows
 
