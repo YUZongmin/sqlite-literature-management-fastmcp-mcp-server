@@ -1,111 +1,211 @@
-# TODO: Implement Concept-Paper Linking
+# TODO: Memory Graph Integration for Literature Server
 
-Source: @modelcontextprotocol/server-memory
+This document outlines the plan to extend the literature server with memory graph integration capabilities, enabling seamless connections between research papers and knowledge entities.
 
-This document outlines the tasks required to connect concepts in the memory knowledge graph with source papers in the literature database.
+## Phase 1: Foundation - Basic Entity Linking
 
-## Goal
+- [ ] **Schema Enhancement:**
 
-Enable Claude to associate research papers with relevant concepts and to retrieve source papers for concepts discussed in the chat.
+  ```sql
+  -- Single table for tracking paper-entity relationships
+  CREATE TABLE literature_entity_links (
+      literature_id TEXT,
+      entity_name TEXT,
+      relation_type TEXT,
+      context TEXT,              -- Section/part of paper where entity is discussed
+      notes TEXT,                -- Explanation of relationship
+      PRIMARY KEY (literature_id, entity_name),
+      FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE
+  );
 
-## Phases
+  -- Index for efficient entity-based lookups
+  CREATE INDEX idx_entity_links ON literature_entity_links(entity_name);
+  ```
 
-### Phase 1: Database and Tool Enhancements (Literature Server)
+- [ ] **Core Link Management Tools:**
+  - [ ] Implement basic entity linking tools:
+    ```python
+    @mcp.tool()
+    def link_paper_to_entity(
+        id_str: str,
+        entity_name: str,
+        relation_type: str,
+        context: Optional[str] = None,
+        notes: Optional[str] = None
+    ) -> Dict[str, Any]
+    ```
+  - [ ] Add entity link management:
+    ```python
+    def update_entity_link(...)  # Update existing links
+    def remove_entity_link(...)  # Remove entity links
+    def get_paper_entities(...)  # Get entities for a paper
+    def get_entity_papers(...)   # Get papers for an entity
+    ```
 
--   [ ] **Schema Update:**
-    -   [ ] Add `concepts` table to `schema.sql`:
+## Phase 2: Reading Integration
 
-        ```sql
-        CREATE TABLE concepts (
-            concept_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            concept_name TEXT UNIQUE NOT NULL
-        );
-        ```
+- [ ] **Enhance Section Progress:**
 
-    -   [ ] Add `literature_concepts` table to `schema.sql`:
+  - [ ] Modify `track_reading_progress` schema and function:
+    ```python
+    def track_reading_progress(
+        id_str: str,
+        section: str,
+        status: str,
+        key_points: Optional[List[str]] = None,
+        entities: Optional[List[Dict[str, str]]] = None  # New parameter
+    )
+    ```
+  - [ ] Add entity context tracking to section progress
+  - [ ] Support bulk entity linking during reading
 
-        ```sql
-        CREATE TABLE literature_concepts (
-            literature_id TEXT,
-            concept_id INTEGER,
-            PRIMARY KEY (literature_id, concept_id),
-            FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE,
-            FOREIGN KEY (concept_id) REFERENCES concepts(concept_id) ON DELETE CASCADE
-        );
-        ```
-    -   [ ] Add `literature_entity_links` table to `schema.sql`:
-        ```sql
-        CREATE TABLE literature_entity_links (
-            literature_id TEXT,
-            entity_name TEXT,
-            PRIMARY KEY (literature_id, entity_name),
-            FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id) ON DELETE CASCADE
-        );
-        ```
-    -   [ ] Update database initialization logic to create new tables.
+- [ ] **Note Taking Integration:**
+  - [ ] Enhance note taking with entity support:
+    ```python
+    def update_literature_notes(
+        id_str: str,
+        note_type: str,
+        content: str,
+        entities: Optional[List[Dict[str, str]]] = None,  # New parameter
+        append: bool = True,
+        timestamp: bool = True
+    )
+    ```
+  - [ ] Add entity extraction from notes
+  - [ ] Support entity linking in specific note sections
 
--   [ ] **New Tools:**
-    -   [ ] Implement `add_concept(concept_name: str) -> int`
-        -   Inserts a new concept into `concepts` (or ignores if it exists).
-        -   Returns the `concept_id`.
-    -   [ ] Implement `link_concept_to_literature(id_str: str, concept_name: str)`
-        -   Adds an entry to `literature_concepts`, linking literature to the concept.
-        -   Calls `add_concept` to ensure the concept exists.
-    -   [ ] Implement `get_concepts_for_literature(id_str: str) -> List[str]`
-        -   Retrieves a list of concept names associated with a literature ID.
-    -   [ ] Implement `find_literature_by_concepts(concept_names: List[str]) -> List[str]`
-        -   Retrieves a list of literature IDs associated with the given concepts.
+## Phase 3: Query & Analysis
 
--   [ ] **Tool Modifications:**
-    -   [ ] Modify `add_literature` to accept an optional `concepts: Optional[List[str]]` parameter.
-        -   If `concepts` is provided, call `add_concept` and `link_concept_to_literature` for each concept after adding the literature.
+- [ ] **Basic Query Tools:**
 
--   [ ] **Code Review:**
-    -   [ ] Review existing literature server code (`.py` file).
-    -   [ ] Identify areas needing adaptation for the new schema and tools.
-    -   [ ] Ensure proper error handling and database connection management.
+  ```python
+  @mcp.tool()
+  def find_papers_by_entities(
+      entity_names: List[str],
+      match_type: str = 'any'  # 'any', 'all', 'exact'
+  ) -> List[Dict[str, Any]]
 
-### Phase 2: Integration with Memory Server
+  @mcp.tool()
+  def get_entity_relationships(
+      entity_name: str
+  ) -> Dict[str, Any]
 
--   [ ] **Memory Server Tool (New):**
-    -   [ ] Implement `search_memory_entities(query: str) -> List[str]` (or similar)
-        -   Searches for entities in the memory server based on a query string.
+  @mcp.tool()
+  def find_common_papers(
+      entity_names: List[str]
+  ) -> List[Dict[str, Any]]
+  ```
 
--   [ ] **Literature Server Tools (New):**
-    -   [ ] Implement `link_literature_to_memory_entity(id_str: str, entity_name: str)`
-        -   Calls `search_memory_entities` to verify entity existence in memory server.
-        -   Adds an entry to `literature_entity_links` table.
-        -   Potentially adds an observation to the entity in the memory server using a hypothetical `add_observation_to_entity` tool.
-    -   [ ] Implement `get_linked_entities(id_str: str) -> List[str]`
-        -   Retrieves entities from the memory graph that are linked to a specific piece of literature.
-    -   [ ] Implement `get_linked_literature(entity_name: str) -> List[str]`
-        -   Retrieves literature linked to a specific entity in the memory graph.
+- [ ] **Analysis Tools:**
 
--   [ ] **Inter-Server Communication:**
-    -   [ ] Choose and implement a communication method between servers (e.g., direct API calls, message queue).
+  ```python
+  @mcp.tool()
+  def analyze_entity_coverage() -> Dict[str, Any]
 
--   [ ] **Claude Prompt Engineering:**
-    -   [ ] Update Claude's system prompt:
-        -   Instruct it to identify relevant concepts.
-        -   Instruct it to use the new tools for tagging literature and linking to memory entities.
-        -   Instruct it to use the new tools for retrieving source papers.
+  @mcp.tool()
+  def find_related_entities(
+      id_str: str
+  ) -> List[Dict[str, Any]]
 
-### Phase 3: Testing and Refinement
+  @mcp.tool()
+  def get_entity_paper_stats(
+      entity_name: str
+  ) -> Dict[str, Any]
+  ```
 
--   [ ] **Thorough Testing:**
-    -   [ ] Test each new and modified tool individually.
-    -   [ ] Test the integration between the two servers.
-    -   [ ] Create realistic scenarios for Claude to use the new functionalities.
+## Phase 4: Integration with Memory Graph
 
--   [ ] **Performance Optimization:**
-    -   [ ] Add indexes to new tables if needed for performance.
-    -   [ ] Profile code to identify bottlenecks.
+- [ ] **Memory Graph Reading:**
 
--   [ ] **Error Handling and Robustness:**
-    -   [ ] Ensure graceful handling of errors (database, network, missing entities).
+  - [ ] Add configuration for memory graph location:
+    ```python
+    MEMORY_GRAPH_PATH = os.environ.get('MEMORY_GRAPH_PATH')
+    ```
+  - [ ] Implement memory graph parsing:
+
+    ```python
+    class MemoryGraphReader:
+        def __init__(self, path: Path):
+            self.path = path
+
+        def get_entity(self, name: str) -> Optional[Dict[str, Any]]:
+            pass
+
+        def validate_entity(self, name: str) -> bool:
+            pass
+    ```
+
+  - [ ] Add entity validation against memory graph
+
+- [ ] **Synchronization Tools:**
+  - [ ] Track memory graph updates
+  - [ ] Handle entity renames/merges
+  - [ ] Clean up orphaned links
+
+## Phase 5: Research Support
+
+- [ ] **Enhanced Search:**
+
+  ```python
+  @mcp.tool()
+  def search_papers_by_entity_pattern(
+      pattern: Dict[str, Any]  # Entity relationship pattern
+  ) -> List[Dict[str, Any]]
+
+  @mcp.tool()
+  def find_bridging_papers(
+      entity_names: List[str]
+  ) -> List[Dict[str, Any]]
+  ```
+
+- [ ] **Research Insights:**
+
+  ```python
+  @mcp.tool()
+  def generate_entity_summary(
+      entity_name: str
+  ) -> Dict[str, Any]
+
+  @mcp.tool()
+  def track_entity_evolution(
+      entity_name: str
+  ) -> List[Dict[str, Any]]
+  ```
+
+## Phase 6: Testing & Documentation
+
+- [ ] **Testing:**
+
+  - [ ] Unit tests for all new tools
+  - [ ] Integration tests with sample memory graph
+  - [ ] Edge case handling
+  - [ ] Performance benchmarks
+
+- [ ] **Documentation:**
+  - [ ] Update README with memory graph features
+  - [ ] Add example workflows for entity linking
+  - [ ] Document best practices
+  - [ ] API documentation for new tools
+
+## Phase 7: Workflow Optimization
+
+- [ ] **User Experience:**
+
+  - [ ] Implement bulk operations
+  - [ ] Add entity suggestions
+  - [ ] Create quick lookup tools
+  - [ ] Add interactive workflows
+
+- [ ] **Performance:**
+  - [ ] Query optimization
+  - [ ] Implement caching
+  - [ ] Index tuning
+  - [ ] Batch operations
 
 ## Notes
 
-- This TODO list assumes the use of a dedicated `concepts` table (recommended approach).
-- Adjust the tasks as needed based on your specific implementation choices.
-- Consider adding more detailed documentation to the code as you implement these features.
+- All new tools should follow existing error handling patterns
+- Maintain backward compatibility where possible
+- Consider adding versioning to entity links
+- Plan for future extensibility (e.g., more relationship types)
+- Keep memory graph synchronization lightweight and efficient
