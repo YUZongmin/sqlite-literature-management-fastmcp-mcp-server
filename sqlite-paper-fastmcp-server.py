@@ -7,69 +7,8 @@ from fastmcp import FastMCP
 from datetime import datetime
 import re
 
-class LiteratureIdentifier:
-    """Handles flexible source identifiers for different sources"""
-    
-    # Expand valid sources to include all supported types
-    VALID_SOURCES = {
-        'semanticscholar', 'arxiv', 'doi',  # Academic papers
-        'webpage', 'blog', 'video', 'book',  # Other sources
-        'custom'  # Fallback
-    }
-    
-    # Add source type mapping for automatic type inference
-    SOURCE_TYPE_MAPPINGS = {
-        'semanticscholar': 'paper',
-        'arxiv': 'paper',
-        'doi': 'paper',
-        'webpage': 'webpage',
-        'blog': 'blog',
-        'video': 'video',
-        'book': 'book',
-        'custom': 'custom'
-    }
-    
-    VALID_STATUSES = {'unread', 'reading', 'completed', 'archived'}
-    VALID_ENTITY_RELATIONS = {
-        'discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques'
-    }
-    
-    def __init__(self, id_str: str):
-        self.source, self.id = self._parse_id(id_str)
-        
-    def _parse_id(self, id_str: str) -> Tuple[str, str]:
-        """Parse ID format: "source:id" e.g., "semanticscholar:649def34", "arxiv:2106.15928"
-        Default to "custom:id" if no source specified
-        """
-        if ':' in id_str:
-            source, id_part = id_str.split(':', 1)
-            source = source.lower()
-            if source not in self.VALID_SOURCES:
-                raise ValueError(f"Invalid source '{source}'. Valid sources: {', '.join(self.VALID_SOURCES)}")
-            return source, id_part
-        return 'custom', id_str
-        
-    @property 
-    def full_id(self) -> str:
-        """Return the full identifier in source:id format"""
-        return f"{self.source}:{self.id}"
-
-    @property
-    def source_type(self) -> str:
-        """Return the inferred source type based on the source"""
-        return self.SOURCE_TYPE_MAPPINGS[self.source]
-    
-    @classmethod
-    def validate(cls, id_str: str) -> bool:
-        """Validate if the given ID string is properly formatted"""
-        try:
-            cls(id_str)
-            return True
-        except ValueError:
-            return False
-
 # Initialize FastMCP server
-mcp = FastMCP("Literature Manager")
+mcp = FastMCP("Source Manager")
 
 # Path to Literature database - must be provided via SQLITE_DB_PATH environment variable
 if 'SQLITE_DB_PATH' not in os.environ:
@@ -77,7 +16,28 @@ if 'SQLITE_DB_PATH' not in os.environ:
 DB_PATH = Path(os.environ['SQLITE_DB_PATH'])
 
 
+# Classes
+
+class SourceIdentifiers:
+    """Defines valid identifier types for sources"""
+    VALID_TYPES = {
+        'semantic_scholar',  # For academic papers via Semantic Scholar
+        'arxiv',            # For arXiv papers
+        'doi',             # For papers with DOI
+        'isbn',            # For books
+        'url'              # For webpages, blogs, videos
+    }
+
+class SourceTypes:
+    """Defines valid source types"""
+    VALID_TYPES = {'paper', 'webpage', 'book', 'video', 'blog'}
+
+class SourceStatus:
+    """Defines valid source status values"""
+    VALID_STATUS = {'unread', 'reading', 'completed', 'archived'}
+
 class SQLiteConnection:
+    """Context manager for SQLite database connections"""
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.conn = None
@@ -91,442 +51,167 @@ class SQLiteConnection:
         if self.conn:
             self.conn.close()
 
-@mcp.tool()
-def add_literature(
-    id_str: str,
-    importance: Optional[int] = 3,
-    notes: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    source_type: Optional[str] = None,
-    source_url: Optional[str] = None
-) -> Dict[str, Any]:
-    """Add literature to the reading list.
-    
-    Args:
-        id_str: Literature ID in format "source:id" (e.g., "arxiv:2106.15928")
-        importance: Literature importance (1-5)
-        notes: Initial notes
-        tags: List of tags to apply
-        source_type: Optional override for source type (defaults to inferred type)
-        source_url: URL or direct link to the source
-    
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Use inferred source type if not explicitly provided
-    inferred_type = lit_id.source_type
-    final_source_type = source_type if source_type else inferred_type
-    
-    # Validate source_type if provided
-    valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
-    if final_source_type not in valid_source_types:
-        raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Add to reading_list with source metadata
-            cursor.execute("""
-                INSERT INTO reading_list (
-                    literature_id, source, source_type, source_url,
-                    importance, notes
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [
-                lit_id.full_id, lit_id.source, final_source_type, source_url,
-                importance, notes
-            ])
-            
-            # Add tags if provided
-            if tags:
-                cursor.executemany("""
-                    INSERT INTO tags (literature_id, tag)
-                    VALUES (?, ?)
-                """, [(lit_id.full_id, tag) for tag in tags])
-            
-            conn.commit()
-            return {"status": "success", "literature_id": lit_id.full_id}
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
+class EntityRelations:
+    """Defines valid relation types for entity links"""
+    VALID_TYPES = {
+        'discusses',
+        'introduces', 
+        'extends',
+        'evaluates',
+        'applies',
+        'critiques'
+    }
 
-@mcp.tool()
-def update_literature_status(
-    id_str: str,
-    status: str,
-    notes: Optional[str] = None
-) -> Dict[str, Any]:
-    """Update literature reading status and optionally add notes.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        status: New status ('unread', 'reading', 'completed', 'archived')
-        notes: Additional notes to append (if provided)
-    
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            updates = ["status = ?", "last_accessed = CURRENT_TIMESTAMP"]
-            params = [status]
-            
-            if notes:
-                updates.append("notes = COALESCE(notes || '\n\n', '') || ?")
-                params.append(notes)
-                
-            query = f"""
-                UPDATE reading_list 
-                SET {', '.join(updates)}
-                WHERE literature_id = ?
-            """
-            params.append(lit_id.full_id)
-            
-            cursor.execute(query, params)
-            if cursor.rowcount == 0:
-                raise ValueError(f"Literature {lit_id.full_id} not found in reading list")
-                
-            conn.commit()
-            return {"status": "success", "literature_id": lit_id.full_id, "new_status": status}
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
 
-@mcp.tool()
-def update_literature_notes(
-    id_str: str,
-    content: str,
-    entities: Optional[List[Dict[str, str]]] = None,
-    append: bool = True,
-    timestamp: bool = True
-) -> Dict[str, Any]:
-    """Update literature notes with optional entity linking.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        content: Note content
-        entities: Optional list of entities mentioned in these notes
-                 Format: [{"name": "entity_name", 
-                          "relation_type": "discusses",
-                          "notes": "optional notes"}]
-        append: If True, append to existing notes, if False, replace
-        timestamp: If True, add timestamp to note
-    
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Get existing notes
-            cursor.execute("SELECT notes FROM reading_list WHERE literature_id = ?", [lit_id.full_id])
-            result = cursor.fetchone()
-            if not result:
-                raise ValueError(f"Literature {lit_id.full_id} not found")
-                
-            existing_notes = result['notes'] or ""
-            
-            # Format new note
-            formatted_note = f"\n\n"
-            if timestamp:
-                formatted_note += f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}]\n"
-            formatted_note += content
-            
-            # Update notes
-            new_notes = existing_notes + formatted_note if append else formatted_note
-            
-            cursor.execute("""
-                UPDATE reading_list 
-                SET notes = ?, last_accessed = CURRENT_TIMESTAMP
-                WHERE literature_id = ?
-            """, [new_notes, lit_id.full_id])
-            
-            # Add entity links if provided
-            if entities:
-                for entity in entities:
-                    # Validate relation type
-                    relation_type = entity.get('relation_type', 'discusses')
-                    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-                        raise ValueError(f"Invalid relation type '{relation_type}'. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-                    
-                    cursor.execute("""
-                        INSERT OR REPLACE INTO literature_entity_links
-                        (literature_id, entity_name, relation_type, notes)
-                        VALUES (?, ?, ?, ?)
-                    """, [
-                        lit_id.full_id,
-                        entity['name'],
-                        relation_type,
-                        entity.get('notes')
-                    ])
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entities_linked": len(entities) if entities else 0
-            }
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
+# Core Helper Functions
 
-@mcp.tool()
-def link_paper_to_entity(
-    id_str: str,
-    entity_name: str,
-    relation_type: str,
-    notes: Optional[str] = None
-) -> Dict[str, Any]:
-    """Create a link between a paper and an entity in the knowledge graph.
+def search_source(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    db_path: Path
+) -> Tuple[Optional[str], List[Dict]]:
+    """
+    Core search function for finding sources in the database.
     
     Args:
-        id_str: Literature ID in format "source:id" 
-        entity_name: Name of the entity to link to
-        relation_type: Type of relationship (discusses, introduces, extends, etc.)
-        notes: Optional notes explaining the relationship
+        title: Source title
+        type: Source type (must be in SourceTypes.VALID_TYPES)
+        identifier_type: Type of identifier (must be in SourceIdentifiers.VALID_TYPES)
+        identifier_value: Value of the identifier
+        db_path: Path to SQLite database
         
     Returns:
-        Dictionary containing the operation results
+        Tuple containing:
+        - UUID of exact match if found by identifier (else None)
+        - List of potential matches by title/type (empty if exact match found)
+        
+    Raises:
+        ValueError: If invalid type or identifier_type provided
     """
-    lit_id = LiteratureIdentifier(id_str)
+    # Validate inputs
+    if type not in SourceTypes.VALID_TYPES:
+        raise ValueError(f"Invalid source type. Must be one of: {SourceTypes.VALID_TYPES}")
+        
+    if identifier_type not in SourceIdentifiers.VALID_TYPES:
+        raise ValueError(f"Invalid identifier type. Must be one of: {SourceIdentifiers.VALID_TYPES}")
     
-    # Validate relation type
-    if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
+    with SQLiteConnection(db_path) as conn:
         cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                INSERT INTO literature_entity_links 
-                (literature_id, entity_name, relation_type, notes)
-                VALUES (?, ?, ?, ?)
-            """, [lit_id.full_id, entity_name, relation_type, notes])
+        
+        # First try exact identifier match
+        cursor.execute("""
+            SELECT id FROM sources
+            WHERE type = ? AND 
+                  json_extract(identifiers, ?) = ?
+        """, [
+            type,
+            f"$.{identifier_type}",
+            identifier_value
+        ])
+        
+        result = cursor.fetchone()
+        if result:
+            return result['id'], []
             
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name,
-                "relation_type": relation_type
+        # If no exact match, try fuzzy title match with same type
+        cursor.execute("""
+            SELECT id, title, identifiers
+            FROM sources
+            WHERE type = ? AND 
+                  LOWER(title) LIKE ?
+        """, [
+            type,
+            f"%{title.lower()}%"
+        ])
+        
+        potential_matches = []
+        for row in cursor.fetchall():
+            match_data = {
+                'id': row['id'],
+                'title': row['title'],
+                'identifiers': json.loads(row['identifiers'])
             }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
+            potential_matches.append(match_data)
+            
+        return None, potential_matches
 
-@mcp.tool()
-def get_paper_entities(id_str: str) -> Dict[str, Any]:
-    """Get all entities linked to a paper.
+def get_source_details(uuid: str, db_path: Path) -> Dict:
+    """
+    Get complete information about a source by UUID.
     
     Args:
-        id_str: Literature ID in format "source:id"
+        uuid: Source UUID
+        db_path: Path to SQLite database
         
     Returns:
-        Dictionary containing the paper's linked entities and their relationships
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT entity_name, relation_type, notes, created_at
-                FROM literature_entity_links
-                WHERE literature_id = ?
-                ORDER BY created_at DESC
-            """, [lit_id.full_id])
-            
-            return {
-                "literature_id": lit_id.full_id,
-                "entities": [dict(row) for row in cursor.fetchall()]
-            }
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def get_entity_papers(
-    entity_name: str,
-    status: Optional[str] = None,
-    min_importance: Optional[int] = None,
-    sort_by: str = 'importance'  # 'importance', 'date', 'status'
-) -> Dict[str, Any]:
-    """Get all papers linked to an entity with filtering options.
-    
-    Args:
-        entity_name: Name of the entity
-        status: Optional filter by paper status
-        min_importance: Optional minimum importance level (1-5)
-        sort_by: Sort results by ('importance', 'date', 'status')
+        Dictionary containing all source information:
+        - Basic info (id, title, type, status, identifiers)
+        - Notes (list of {title, content, created_at})
+        - Entity links (list of {entity_name, relation_type, notes})
         
-    Returns:
-        Dictionary containing the entity's linked papers and their relationships
+    Raises:
+        ValueError: If source with UUID not found
     """
-    # Validate parameters
-    if status and status not in LiteratureIdentifier.VALID_STATUSES:
-        raise ValueError(f"Invalid status. Valid statuses: {', '.join(LiteratureIdentifier.VALID_STATUSES)}")
-    
-    if min_importance and not (1 <= min_importance <= 5):
-        raise ValueError("min_importance must be between 1 and 5")
-    
-    if sort_by not in {'importance', 'date', 'status'}:
-        raise ValueError("sort_by must be one of: 'importance', 'date', 'status'")
-    
-    with SQLiteConnection(DB_PATH) as conn:
+    with SQLiteConnection(db_path) as conn:
         cursor = conn.cursor()
-        try:
-            # Build query with filters
-            query = """
-                SELECT l.literature_id, l.relation_type, l.notes,
-                       r.status, r.importance, r.source, r.source_type, r.source_url,
-                       r.added_date, r.last_accessed
-                FROM literature_entity_links l
-                JOIN reading_list r ON l.literature_id = r.literature_id
-                WHERE l.entity_name = ?
-            """
-            params = [entity_name]
-            
-            if status:
-                query += " AND r.status = ?"
-                params.append(status)
-            
-            if min_importance:
-                query += " AND r.importance >= ?"
-                params.append(min_importance)
-            
-            # Add sorting
-            query += {
-                'importance': ' ORDER BY r.importance DESC, r.last_accessed DESC',
-                'date': ' ORDER BY r.last_accessed DESC, r.importance DESC',
-                'status': ' ORDER BY r.status, r.importance DESC'
-            }[sort_by]
-            
-            cursor.execute(query, params)
-            papers = [dict(row) for row in cursor.fetchall()]
-            
-            return {
-                "entity": entity_name,
-                "total_papers": len(papers),
-                "filters_applied": {
-                    "status": status,
-                    "min_importance": min_importance,
-                    "sort_by": sort_by
-                },
-                "papers": papers
-            }
-        except sqlite3.Error as e:
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def update_entity_link(
-    id_str: str,
-    entity_name: str,
-    relation_type: Optional[str] = None,
-    notes: Optional[str] = None
-) -> Dict[str, Any]:
-    """Update an existing link between a paper and an entity.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        entity_name: Name of the entity
-        relation_type: Optional new relationship type
-        notes: Optional new notes
         
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Validate relation type if provided
-    if relation_type and relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-        raise ValueError(f"Invalid relation type. Valid types: {', '.join(LiteratureIdentifier.VALID_ENTITY_RELATIONS)}")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Build update query dynamically based on provided fields
-            updates = []
-            params = []
-            
-            if relation_type:
-                updates.append("relation_type = ?")
-                params.append(relation_type)
-            if notes is not None:
-                updates.append("notes = ?")
-                params.append(notes)
-                
-            if not updates:
-                raise ValueError("No updates provided")
-                
-            params.extend([lit_id.full_id, entity_name])
-            
-            query = f"""
-                UPDATE literature_entity_links 
-                SET {', '.join(updates)}
-                WHERE literature_id = ? AND entity_name = ?
-            """
-            
-            cursor.execute(query, params)
-            if cursor.rowcount == 0:
-                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name
-            }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def remove_entity_link(
-    id_str: str,
-    entity_name: str
-) -> Dict[str, Any]:
-    """Remove a link between a paper and an entity.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        entity_name: Name of the entity
+        # Get basic source info
+        cursor.execute("""
+            SELECT id, title, type, status, identifiers
+            FROM sources
+            WHERE id = ?
+        """, [uuid])
         
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                DELETE FROM literature_entity_links
-                WHERE literature_id = ? AND entity_name = ?
-            """, [lit_id.full_id, entity_name])
+        source = cursor.fetchone()
+        if not source:
+            raise ValueError(f"Source with UUID {uuid} not found")
             
-            if cursor.rowcount == 0:
-                raise ValueError(f"No link found between {lit_id.full_id} and {entity_name}")
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entity": entity_name
+        source_data = {
+            'id': source['id'],
+            'title': source['title'],
+            'type': source['type'],
+            'status': source['status'],
+            'identifiers': json.loads(source['identifiers'])
+        }
+        
+        # Get notes
+        cursor.execute("""
+            SELECT note_title, content, created_at
+            FROM source_notes
+            WHERE source_id = ?
+            ORDER BY created_at DESC
+        """, [uuid])
+        
+        source_data['notes'] = [
+            {
+                'title': row['note_title'],
+                'content': row['content'],
+                'created_at': row['created_at']
             }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
+            for row in cursor.fetchall()
+        ]
+        
+        # Get entity links
+        cursor.execute("""
+            SELECT entity_name, relation_type, notes
+            FROM source_entity_links
+            WHERE source_id = ?
+        """, [uuid])
+        
+        source_data['entity_links'] = [
+            {
+                'entity_name': row['entity_name'],
+                'relation_type': row['relation_type'],
+                'notes': row['notes']
+            }
+            for row in cursor.fetchall()
+        ]
+        
+        return source_data
 
-# Include original tools for completeness
+# Original tools for completeness for sqlite
 @mcp.tool()
 def read_query(
     query: str,
@@ -788,410 +473,627 @@ def vacuum_database() -> Dict[str, Any]:
         except sqlite3.Error as e:
             raise ValueError(f"SQLite error: {str(e)}")
 
+
+
+# Public tools
+
 @mcp.tool()
-def backup_database(backup_path: str) -> Dict[str, Any]:
-    """Create a backup of the database file.
+def add_source(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    initial_note: Optional[Dict[str, str]] = None  # {"title": "...", "content": "..."}
+) -> Dict[str, Any]:
+    """Add a new source with duplicate checking.
     
     Args:
-        backup_path: Path where to save the backup file
-        
+        title: Source title
+        type: Source type (paper, webpage, book, video, blog)
+        identifier_type: Type of identifier (semantic_scholar, arxiv, doi, isbn, url)
+        identifier_value: Value of the identifier
+        initial_note: Optional initial note with title and content
+    
     Returns:
-        Dictionary containing the backup operation results
+        Dictionary containing the operation results
     """
     if not DB_PATH.exists():
-        raise FileNotFoundError(f"Literature database not found at: {DB_PATH}")
-    
-    backup_path = Path(backup_path)
-    
-    try:
-        # Create backup directory if it doesn't exist
-        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
         
-        with SQLiteConnection(DB_PATH) as source_conn:
-            # Create new database connection for backup
-            backup_conn = sqlite3.connect(str(backup_path))
-            
-            try:
-                # Backup database
-                source_conn.backup(backup_conn)
-                
-                # Get size of backup file
-                backup_size = os.path.getsize(backup_path)
-                
-                return {
-                    "status": "success",
-                    "backup_path": str(backup_path),
-                    "backup_size_bytes": backup_size,
-                    "timestamp": datetime.now().isoformat()
-                }
-                
-            finally:
-                backup_conn.close()
-                
-    except (sqlite3.Error, OSError) as e:
-        raise ValueError(f"Backup error: {str(e)}")
-
-@mcp.tool()
-def bulk_link_entities(
-    id_str: str,
-    entities: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """Create multiple entity links for a paper in a single transaction.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        entities: List of entity dictionaries, each containing:
-                 {
-                     "name": str,
-                     "relation_type": str,
-                     "notes": Optional[str]
-                 }
-    
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    if not entities:
-        raise ValueError("At least one entity must be provided")
-    
-    # Validate all entities first
-    for i, entity in enumerate(entities):
-        if not entity.get('name'):
-            raise ValueError(f"Entity {i} missing required 'name' field")
-        relation_type = entity.get('relation_type', 'discusses')
-        if relation_type not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
-            raise ValueError(f"Invalid relation_type '{relation_type}' for entity '{entity['name']}'")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Prepare batch insert
-            cursor.executemany("""
-                INSERT OR REPLACE INTO literature_entity_links
-                (literature_id, entity_name, relation_type, notes)
-                VALUES (?, ?, ?, ?)
-            """, [
-                (lit_id.full_id, entity['name'], 
-                 entity.get('relation_type', 'discusses'),
-                 entity.get('notes'))
-                for entity in entities
-            ])
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "entities_linked": len(entities)
-            }
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def update_source_metadata(
-    id_str: str,
-    source_type: Optional[str] = None,
-    source_url: Optional[str] = None
-) -> Dict[str, Any]:
-    """Update source metadata for a literature entry.
-    
-    Args:
-        id_str: Literature ID in format "source:id"
-        source_type: Optional new source type
-        source_url: Optional new source URL
-        
-    Returns:
-        Dictionary containing the operation results
-    """
-    lit_id = LiteratureIdentifier(id_str)
-    
-    # Validate source_type if provided
-    if source_type:
-        valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
-        if source_type not in valid_source_types:
-            raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
-    
-    # Ensure at least one field is being updated
-    if source_type is None and source_url is None:
-        raise ValueError("At least one of source_type or source_url must be provided")
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            # Build update query dynamically
-            updates = []
-            params = []
-            
-            if source_type:
-                updates.append("source_type = ?")
-                params.append(source_type)
-            if source_url is not None:
-                updates.append("source_url = ?")
-                params.append(source_url)
-                
-            params.append(lit_id.full_id)
-            
-            query = f"""
-                UPDATE reading_list 
-                SET {', '.join(updates)}
-                WHERE literature_id = ?
-            """
-            
-            cursor.execute(query, params)
-            if cursor.rowcount == 0:
-                raise ValueError(f"Literature {lit_id.full_id} not found")
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "literature_id": lit_id.full_id,
-                "updated_fields": {
-                    "source_type": source_type if source_type else "unchanged",
-                    "source_url": source_url if source_url else "unchanged"
-                }
-            }
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def bulk_update_source_metadata(
-    updates: List[Dict[str, Any]]
-) -> Dict[str, Any]:
-    """Update source metadata for multiple literature entries in a single transaction.
-    
-    Args:
-        updates: List of update dictionaries, each containing:
-                {
-                    "id_str": str,  # Literature ID in source:id format
-                    "source_type": Optional[str],
-                    "source_url": Optional[str]
-                }
-    
-    Returns:
-        Dictionary containing the operation results
-    """
-    if not updates:
-        raise ValueError("Updates list cannot be empty")
-    
-    # Validate all updates first
-    valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
-    validated_updates = []
-    
-    for i, update in enumerate(updates):
-        if 'id_str' not in update:
-            raise ValueError(f"Update {i} missing required 'id_str' field")
-        
-        lit_id = LiteratureIdentifier(update['id_str'])
-        
-        if 'source_type' in update and update['source_type'] not in valid_source_types:
-            raise ValueError(f"Invalid source_type for {lit_id.full_id}. Valid types: {', '.join(valid_source_types)}")
-            
-        if 'source_type' not in update and 'source_url' not in update:
-            raise ValueError(f"Update for {lit_id.full_id} must include at least source_type or source_url")
-            
-        validated_updates.append({
-            'literature_id': lit_id.full_id,
-            'source_type': update.get('source_type'),
-            'source_url': update.get('source_url')
-        })
-    
-    with SQLiteConnection(DB_PATH) as conn:
-        cursor = conn.cursor()
-        try:
-            success_count = 0
-            failed_updates = []
-            
-            for update in validated_updates:
-                try:
-                    updates = []
-                    params = []
-                    
-                    if update['source_type']:
-                        updates.append("source_type = ?")
-                        params.append(update['source_type'])
-                    if update['source_url'] is not None:
-                        updates.append("source_url = ?")
-                        params.append(update['source_url'])
-                        
-                    params.append(update['literature_id'])
-                    
-                    query = f"""
-                        UPDATE reading_list 
-                        SET {', '.join(updates)}
-                        WHERE literature_id = ?
-                    """
-                    
-                    cursor.execute(query, params)
-                    if cursor.rowcount > 0:
-                        success_count += 1
-                    else:
-                        failed_updates.append({
-                            "literature_id": update['literature_id'],
-                            "reason": "Entry not found"
-                        })
-                        
-                except Exception as e:
-                    failed_updates.append({
-                        "literature_id": update['literature_id'],
-                        "reason": str(e)
-                    })
-            
-            conn.commit()
-            return {
-                "status": "success",
-                "total_updates": len(validated_updates),
-                "successful_updates": success_count,
-                "failed_updates": failed_updates
-            }
-            
-        except sqlite3.Error as e:
-            conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
-
-@mcp.tool()
-def bulk_add_literature(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Add multiple literature entries in a single transaction.
-    
-    Args:
-        items: List of dictionaries, each containing:
-              Required:
-                - id_str: Literature ID in format "source:id"
-              Optional:
-                - importance: Rating 1-5
-                - notes: Initial notes
-                - tags: List of strings
-                - source_url: Direct link to source
-                - source_type: Override for inferred type
-    
-    Returns:
-        Dictionary containing the operation results including
-        successes, failures, and skipped duplicates
-    """
-    if not items:
-        raise ValueError("Items list cannot be empty")
-    
-    # Pre-validate all items
-    validated_items = []
-    validation_errors = []
-    
-    for i, item in enumerate(items):
-        try:
-            if 'id_str' not in item:
-                raise ValueError("Missing required 'id_str' field")
-            
-            lit_id = LiteratureIdentifier(item['id_str'])
-            
-            # Validate importance if provided
-            importance = item.get('importance', 3)
-            if not isinstance(importance, int) or not (1 <= importance <= 5):
-                raise ValueError("Importance must be an integer between 1 and 5")
-            
-            # Validate tags if provided
-            tags = item.get('tags', [])
-            if tags and not isinstance(tags, list):
-                raise ValueError("Tags must be a list of strings")
-            
-            # Validate and get source type
-            inferred_type = lit_id.source_type
-            source_type = item.get('source_type', inferred_type)
-            valid_source_types = set(LiteratureIdentifier.SOURCE_TYPE_MAPPINGS.values())
-            if source_type not in valid_source_types:
-                raise ValueError(f"Invalid source_type. Valid types: {', '.join(valid_source_types)}")
-            
-            validated_items.append({
-                'literature_id': lit_id.full_id,
-                'source': lit_id.source,
-                'source_type': source_type,
-                'source_url': item.get('source_url'),
-                'importance': importance,
-                'notes': item.get('notes'),
-                'tags': tags
-            })
-            
-        except Exception as e:
-            validation_errors.append({
-                'index': i,
-                'id_str': item.get('id_str', 'MISSING'),
-                'error': str(e)
-            })
-    
-    if validation_errors and not validated_items:
+    # Search for existing source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if uuid:
         return {
             "status": "error",
-            "message": "All items failed validation",
-            "validation_errors": validation_errors
+            "message": "Source already exists",
+            "existing_source": get_source_details(uuid, DB_PATH)
+        }
+    
+    if potential_matches:
+        return {
+            "status": "error",
+            "message": "Potential duplicates found. Please verify or use add_identifier if these are the same source.",
+            "matches": potential_matches
+        }
+    
+    # Create new source
+    new_id = str(uuid.uuid4())
+    identifiers = {identifier_type: identifier_value}
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Add source
+            cursor.execute("""
+                INSERT INTO sources (id, title, type, identifiers)
+                VALUES (?, ?, ?, ?)
+            """, [
+                new_id,
+                title,
+                type,
+                json.dumps(identifiers)
+            ])
+            
+            # Add initial note if provided
+            if initial_note:
+                if not all(k in initial_note for k in ('title', 'content')):
+                    raise ValueError("Initial note must contain 'title' and 'content'")
+                    
+                cursor.execute("""
+                    INSERT INTO source_notes (source_id, note_title, content)
+                    VALUES (?, ?, ?)
+                """, [
+                    new_id,
+                    initial_note['title'],
+                    initial_note['content']
+                ])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(new_id, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def add_note(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    note_title: str,
+    note_content: str
+) -> Dict[str, Any]:
+    """Add a new note to an existing source.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+        note_title: Title for the new note
+        note_content: Content of the note
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
         }
     
     with SQLiteConnection(DB_PATH) as conn:
         cursor = conn.cursor()
         try:
-            # Track results
-            added_items = []
-            skipped_items = []
-            failed_items = []
+            # Check if note with same title exists
+            cursor.execute("""
+                SELECT 1 FROM source_notes
+                WHERE source_id = ? AND note_title = ?
+            """, [uuid, note_title])
             
-            # Prepare batch insert for reading_list
-            cursor.executemany("""
-                INSERT OR IGNORE INTO reading_list (
-                    literature_id, source, source_type, source_url,
-                    importance, notes
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [
-                (item['literature_id'], item['source'], item['source_type'],
-                 item['source_url'], item['importance'], item['notes'])
-                for item in validated_items
-            ])
+            if cursor.fetchone():
+                return {
+                    "status": "error",
+                    "message": "Note with this title already exists for this source"
+                }
             
-            # Check which items were actually inserted
-            for item in validated_items:
-                cursor.execute("""
-                    SELECT 1 FROM reading_list 
-                    WHERE literature_id = ? AND 
-                          added_date > datetime('now', '-1 minute')
-                """, [item['literature_id']])
-                
-                if cursor.fetchone():
-                    added_items.append(item['literature_id'])
-                    
-                    # Add tags if present
-                    if item['tags']:
-                        cursor.executemany("""
-                            INSERT OR IGNORE INTO tags (literature_id, tag)
-                            VALUES (?, ?)
-                        """, [(item['literature_id'], tag) for tag in item['tags']])
-                else:
-                    cursor.execute("SELECT 1 FROM reading_list WHERE literature_id = ?",
-                                 [item['literature_id']])
-                    if cursor.fetchone():
-                        skipped_items.append(item['literature_id'])
-                    else:
-                        failed_items.append({
-                            'literature_id': item['literature_id'],
-                            'reason': 'Insert failed'
-                        })
+            # Add new note
+            cursor.execute("""
+                INSERT INTO source_notes (source_id, note_title, content)
+                VALUES (?, ?, ?)
+            """, [uuid, note_title, note_content])
             
             conn.commit()
             return {
                 "status": "success",
-                "total_items": len(validated_items),
-                "added_items": len(added_items),
-                "skipped_items": len(skipped_items),
-                "failed_items": len(failed_items),
-                "validation_errors": validation_errors,
-                "details": {
-                    "added": added_items,
-                    "skipped": skipped_items,
-                    "failed": failed_items
-                }
+                "source": get_source_details(uuid, DB_PATH)
             }
             
         except sqlite3.Error as e:
             conn.rollback()
-            raise ValueError(f"SQLite error: {str(e)}")
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def update_status(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    new_status: str
+) -> Dict[str, Any]:
+    """Update source reading status.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+        new_status: New status ('unread', 'reading', 'completed', 'archived')
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    if new_status not in SourceStatus.VALID_STATUS:
+        raise ValueError(f"Invalid status. Must be one of: {SourceStatus.VALID_STATUS}")
+    
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                UPDATE sources 
+                SET status = ?
+                WHERE id = ?
+            """, [new_status, uuid])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(uuid, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def add_identifier(
+    title: str,
+    type: str,
+    current_identifier_type: str,
+    current_identifier_value: str,
+    new_identifier_type: str,
+    new_identifier_value: str
+) -> Dict[str, Any]:
+    """Add a new identifier to an existing source.
+    
+    Args:
+        title: Source title
+        type: Source type
+        current_identifier_type: Current identifier type
+        current_identifier_value: Current identifier value
+        new_identifier_type: New identifier type to add
+        new_identifier_value: New identifier value to add
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    # Validate new identifier type
+    if new_identifier_type not in SourceIdentifiers.VALID_TYPES:
+        raise ValueError(f"Invalid new identifier type. Must be one of: {SourceIdentifiers.VALID_TYPES}")
+    
+    # Find source by current identifier
+    uuid, _ = search_source(title, type, current_identifier_type, current_identifier_value, DB_PATH)
+    if not uuid:
+        return {
+            "status": "error",
+            "message": "Source not found with current identifier"
+        }
+    
+    # Check if new identifier already exists on any source
+    check_uuid, _ = search_source(title, type, new_identifier_type, new_identifier_value, DB_PATH)
+    if check_uuid and check_uuid != uuid:
+        return {
+            "status": "error",
+            "message": "New identifier already exists on a different source",
+            "existing_source": get_source_details(check_uuid, DB_PATH)
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Get current identifiers
+            cursor.execute("SELECT identifiers FROM sources WHERE id = ?", [uuid])
+            current_identifiers = json.loads(cursor.fetchone()['identifiers'])
+            
+            # Add new identifier
+            current_identifiers[new_identifier_type] = new_identifier_value
+            
+            # Update source
+            cursor.execute("""
+                UPDATE sources 
+                SET identifiers = ?
+                WHERE id = ?
+            """, [json.dumps(current_identifiers), uuid])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(uuid, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+
+# Entity management tools
+
+@mcp.tool()
+def link_to_entity(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    entity_name: str,
+    relation_type: str,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """Link a source to an entity in the knowledge graph.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+        entity_name: Name of the entity to link to
+        relation_type: Type of relationship
+        notes: Optional notes explaining the relationship
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    if relation_type not in EntityRelations.VALID_TYPES:
+        raise ValueError(f"Invalid relation type. Must be one of: {EntityRelations.VALID_TYPES}")
+    
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Check if link already exists
+            cursor.execute("""
+                SELECT 1 FROM source_entity_links
+                WHERE source_id = ? AND entity_name = ?
+            """, [uuid, entity_name])
+            
+            if cursor.fetchone():
+                return {
+                    "status": "error",
+                    "message": "Link already exists between this source and entity"
+                }
+            
+            # Create link
+            cursor.execute("""
+                INSERT INTO source_entity_links 
+                (source_id, entity_name, relation_type, notes)
+                VALUES (?, ?, ?, ?)
+            """, [uuid, entity_name, relation_type, notes])
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(uuid, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def get_source_entities(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str
+) -> Dict[str, Any]:
+    """Get all entities linked to a source.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+    
+    Returns:
+        Dictionary containing the source's linked entities and their relationships
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
+        }
+    
+    # Return full source details which include entity links
+    return {
+        "status": "success",
+        "source": get_source_details(uuid, DB_PATH)
+    }
+
+@mcp.tool()
+def update_entity_link(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    entity_name: str,
+    relation_type: Optional[str] = None,
+    notes: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update an existing link between a source and an entity.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+        entity_name: Name of the entity
+        relation_type: Optional new relationship type
+        notes: Optional new notes
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    if relation_type and relation_type not in EntityRelations.VALID_TYPES:
+        raise ValueError(f"Invalid relation type. Must be one of: {EntityRelations.VALID_TYPES}")
+        
+    if not relation_type and notes is None:
+        raise ValueError("At least one of relation_type or notes must be provided")
+    
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            updates = []
+            params = []
+            
+            if relation_type:
+                updates.append("relation_type = ?")
+                params.append(relation_type)
+            if notes is not None:
+                updates.append("notes = ?")
+                params.append(notes)
+                
+            params.extend([uuid, entity_name])
+            
+            query = f"""
+                UPDATE source_entity_links 
+                SET {', '.join(updates)}
+                WHERE source_id = ? AND entity_name = ?
+            """
+            
+            cursor.execute(query, params)
+            if cursor.rowcount == 0:
+                return {
+                    "status": "error",
+                    "message": "No link found between this source and entity"
+                }
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(uuid, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def remove_entity_link(
+    title: str,
+    type: str,
+    identifier_type: str,
+    identifier_value: str,
+    entity_name: str
+) -> Dict[str, Any]:
+    """Remove a link between a source and an entity.
+    
+    Args:
+        title: Source title
+        type: Source type
+        identifier_type: Type of identifier
+        identifier_value: Value of the identifier
+        entity_name: Name of the entity
+    
+    Returns:
+        Dictionary containing the operation results
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    # Find source
+    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if not uuid:
+        if potential_matches:
+            return {
+                "status": "error",
+                "message": "Multiple potential matches found. Please verify the source.",
+                "matches": potential_matches
+            }
+        return {
+            "status": "error",
+            "message": "Source not found"
+        }
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                DELETE FROM source_entity_links
+                WHERE source_id = ? AND entity_name = ?
+            """, [uuid, entity_name])
+            
+            if cursor.rowcount == 0:
+                return {
+                    "status": "error",
+                    "message": "No link found between this source and entity"
+                }
+            
+            conn.commit()
+            return {
+                "status": "success",
+                "source": get_source_details(uuid, DB_PATH)
+            }
+            
+        except sqlite3.Error as e:
+            conn.rollback()
+            raise ValueError(f"Database error: {str(e)}")
+
+@mcp.tool()
+def get_entity_sources(
+    entity_name: str,
+    type_filter: Optional[str] = None,
+    relation_filter: Optional[str] = None
+) -> Dict[str, Any]:
+    """Get all sources linked to a specific entity with optional filtering.
+    
+    Args:
+        entity_name: Name of the entity
+        type_filter: Optional filter by source type
+        relation_filter: Optional filter by relation type
+    
+    Returns:
+        Dictionary containing the entity's linked sources
+    """
+    if not DB_PATH.exists():
+        raise FileNotFoundError(f"Database not found at: {DB_PATH}")
+        
+    if type_filter and type_filter not in SourceTypes.VALID_TYPES:
+        raise ValueError(f"Invalid type filter. Must be one of: {SourceTypes.VALID_TYPES}")
+        
+    if relation_filter and relation_filter not in EntityRelations.VALID_TYPES:
+        raise ValueError(f"Invalid relation filter. Must be one of: {EntityRelations.VALID_TYPES}")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            query = """
+                SELECT s.*, l.relation_type, l.notes as relation_notes
+                FROM sources s
+                JOIN source_entity_links l ON s.id = l.source_id
+                WHERE l.entity_name = ?
+            """
+            params = [entity_name]
+            
+            if type_filter:
+                query += " AND s.type = ?"
+                params.append(type_filter)
+                
+            if relation_filter:
+                query += " AND l.relation_type = ?"
+                params.append(relation_filter)
+            
+            cursor.execute(query, params)
+            sources = []
+            for row in cursor.fetchall():
+                source_id = row['id']
+                source_data = get_source_details(source_id, DB_PATH)
+                sources.append(source_data)
+            
+            return {
+                "status": "success",
+                "entity": entity_name,
+                "filters_applied": {
+                    "type": type_filter,
+                    "relation": relation_filter
+                },
+                "sources": sources
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"Database error: {str(e)}")
+
+
+
+
+
 
 if __name__ == "__main__":
     # Start the FastMCP server

@@ -1,33 +1,27 @@
-# Literature Management System
+# Universal Source Management System
 
-A powerful system for managing research papers and integrating with knowledge graphs.
+A flexible system for managing various types of sources (papers, books, webpages, etc.) and integrating them with knowledge graphs.
 
 ## Features
 
 ### Core Features
 
-- Flexible paper identifier system supporting multiple sources
-- Structured note-taking and progress tracking
-- Tag and collection management
-- Customizable importance ratings
+- Universal source identification with internal UUID system
+- Support for multiple source types (papers, webpages, books, videos, blogs)
+- Multiple identifier support per source (arxiv, DOI, semantic scholar, ISBN, URL)
+- Structured note-taking with titles and content
+- Status tracking (unread, reading, completed, archived)
 
-### Entity-Memory Integration
+### Entity Integration
 
-- Link papers to knowledge graph entities
-- Track entity evolution through literature
-- Identify research gaps and opportunities
-- Memory graph synchronization
-
-### Research Support
-
-- Complex entity pattern search
-- Timeline analysis
-- Research gap identification
-- Entity relationship tracking
+- Link sources to knowledge graph entities
+- Track relationships between sources and entities
+- Flexible relation types (discusses, introduces, extends, etc.)
+- Integration with memory graph
 
 ## Prerequisites
 
-This system integrates with the [MCP Memory Server](https://github.com/modelcontextprotocol/servers/tree/main/src/memory) for persistent knowledge graph storage. You'll need to install and configure it first.
+This system integrates with the [MCP Memory Server](https://github.com/modelcontextprotocol/servers/tree/main/src/memory) for persistent knowledge graph storage.
 
 ## Quick Start
 
@@ -35,181 +29,159 @@ This system integrates with the [MCP Memory Server](https://github.com/modelcont
 
 ```bash
 # Create a new database
-sqlite3 literature.db < create_literature_db.sql
+sqlite3 sources.db < create_sources_db.sql
 ```
 
-2. Install the literature management server:
+2. Install the source management server:
 
 ```bash
 # Install for Claude Desktop with your database path
-fastmcp install sqlite-paper-fastmcp-server.py --name "Literature Manager" -e LITERATURE_DB_PATH=/path/to/literature.db
-
-# Optional: Configure memory graph path
-fastmcp config set MEMORY_GRAPH_PATH=/path/to/memory.jsonl
+fastmcp install source-manager-server.py --name "Source Manager" -e SQLITE_DB_PATH=/path/to/sources.db
 ```
 
-The server integrates with both your literature database and the memory graph, providing a seamless experience for managing research papers and knowledge entities.
+## Schema
 
-## Entity Linking Workflows
-
-### 1. Basic Paper-Entity Linking
-
-Link entities while reading a paper:
-
-```python
-track_reading_progress(
-    "arxiv:2312.12456",
-    section="methods",
-    status="completed",
-    entities=[
-        {"name": "transformer", "relation_type": "introduces"},
-        {"name": "attention", "relation_type": "discusses"}
-    ]
-)
-```
-
-Add notes with entity links:
-
-```python
-update_literature_notes(
-    "arxiv:2312.12456",
-    note_type="critique",
-    content="The paper introduces a novel approach...",
-    entities=[
-        {
-            "name": "transformer",
-            "relation_type": "evaluates",
-            "notes": "Novel architecture variant"
-        }
-    ]
-)
-```
-
-### 2. Research Analysis
-
-Track entity evolution:
-
-```python
-track_entity_evolution(
-    "transformer",
-    time_window="2017-2024",
-    include_details=True
-)
-```
-
-Search papers by entity patterns:
-
-```python
-search_papers_by_entity_patterns([
-    {
-        "entity": "transformer",
-        "relation_type": "introduces"
-    },
-    {
-        "entity": "attention",
-        "context": "methods"
-    }
-], match_mode="all")
-```
-
-Identify research gaps:
-
-```python
-identify_research_gaps(
-    min_importance=3,
-    include_suggestions=True
-)
-```
-
-### 3. Memory Graph Integration
-
-Load and validate entities:
-
-```python
-# Load entities from memory graph
-entities = load_memory_entities("memory_graph.jsonl")
-
-# Validate existing links
-validation = validate_entity_links("memory_graph.jsonl")
-
-# Sync with memory graph
-sync_entity_links(
-    "memory_graph.jsonl",
-    auto_remove=False,
-    dry_run=True
-)
-```
-
-## Schema Documentation
-
-### Literature Entity Links
-
-The `literature_entity_links` table tracks relationships between papers and entities:
+### Core Tables
 
 ```sql
-CREATE TABLE literature_entity_links (
-    literature_id TEXT,
-    entity_name TEXT,
-    relation_type TEXT,
-    context TEXT,
-    notes TEXT,
+-- Sources table
+CREATE TABLE sources (
+    id UUID PRIMARY KEY,
+    title TEXT NOT NULL,
+    type TEXT CHECK(type IN ('paper', 'webpage', 'book', 'video', 'blog')) NOT NULL,
+    identifiers JSONB NOT NULL,
+    status TEXT CHECK(status IN ('unread', 'reading', 'completed', 'archived')) DEFAULT 'unread'
+);
+
+-- Source notes
+CREATE TABLE source_notes (
+    source_id UUID REFERENCES sources(id),
+    note_title TEXT NOT NULL,
+    content TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (literature_id, entity_name),
-    FOREIGN KEY (literature_id) REFERENCES reading_list(literature_id)
+    PRIMARY KEY (source_id, note_title)
+);
+
+-- Entity links
+CREATE TABLE source_entity_links (
+    source_id UUID REFERENCES sources(id),
+    entity_name TEXT,
+    relation_type TEXT CHECK(relation_type IN ('discusses', 'introduces', 'extends', 'evaluates', 'applies', 'critiques')),
+    notes TEXT,
+    PRIMARY KEY (source_id, entity_name)
 );
 ```
 
-#### Relation Types
+## Usage Examples
 
-- `introduces`: Paper introduces or defines the entity
-- `discusses`: Paper discusses or uses the entity
-- `extends`: Paper extends or modifies the entity
-- `evaluates`: Paper evaluates or analyzes the entity
-- `applies`: Paper applies the entity to a problem
-- `critiques`: Paper critiques or identifies issues with the entity
+### 1. Managing Sources
 
-#### Indices
+Add a paper with multiple identifiers:
 
-- `idx_entity_name`: Optimize entity-based queries
-- `idx_context`: Optimize context-based filtering
-- `idx_relation_type`: Optimize relation type filtering
+```python
+add_source(
+    title="Attention Is All You Need",
+    type="paper",
+    identifier_type="arxiv",
+    identifier_value="1706.03762",
+    initial_note={
+        "title": "Initial thoughts",
+        "content": "Groundbreaking paper introducing transformers..."
+    }
+)
+
+# Add another identifier to the same paper
+add_identifier(
+    title="Attention Is All You Need",
+    type="paper",
+    current_identifier_type="arxiv",
+    current_identifier_value="1706.03762",
+    new_identifier_type="semantic_scholar",
+    new_identifier_value="204e3073870fae3d05bcbc2f6a8e263d9b72e776"
+)
+```
+
+Add a webpage:
+
+```python
+add_source(
+    title="Understanding Transformers",
+    type="webpage",
+    identifier_type="url",
+    identifier_value="https://example.com/transformers",
+)
+```
+
+### 2. Note Taking
+
+Add notes to a source:
+
+```python
+add_note(
+    title="Attention Is All You Need",
+    type="paper",
+    identifier_type="arxiv",
+    identifier_value="1706.03762",
+    note_title="Implementation details",
+    note_content="The paper describes the architecture..."
+)
+```
+
+### 3. Entity Linking
+
+Link source to entities:
+
+```python
+link_to_entity(
+    title="Attention Is All You Need",
+    type="paper",
+    identifier_type="arxiv",
+    identifier_value="1706.03762",
+    entity_name="transformer",
+    relation_type="introduces",
+    notes="First paper to introduce the transformer architecture"
+)
+```
+
+Query sources by entity:
+
+```python
+get_entity_sources(
+    entity_name="transformer",
+    type_filter="paper",
+    relation_filter="discusses"
+)
+```
 
 ## Best Practices
 
-1. Entity Linking
+1. Source Management
 
-   - Link entities as you read each section
-   - Use specific relation types
-   - Add context and notes for clarity
-   - Validate against memory graph regularly
+   - Use consistent titles across references
+   - Provide as many identifiers as available
+   - Keep notes structured with clear titles
+   - Use appropriate source types
 
-2. Research Analysis
+2. Entity Linking
+   - Be specific with relation types
+   - Add contextual notes to relationships
+   - Verify entity names against memory graph
+   - Keep entity relationships focused
 
-   - Start with high-importance papers
-   - Use multiple entity patterns for precision
-   - Consider time windows for evolution analysis
-   - Review research gaps periodically
+## Technical Details
 
-3. Memory Graph Integration
-   - Keep memory graph up to date
-   - Run validation checks regularly
-   - Review sync changes before applying
-   - Document entity relationships
+1. Source Identification
 
-## Performance Considerations
+   - Internal UUID system for consistent referencing
+   - Multiple external identifiers per source
+   - Flexible identifier types (arxiv, doi, url, etc.)
+   - Title and type based fuzzy matching
 
-1. Query Optimization
-
-   - Use appropriate indices
-   - Filter by importance when possible
-   - Limit result sets for large queries
-   - Use pattern search efficiently
-
-2. Memory Usage
-   - Batch large operations
-   - Use pagination for large result sets
-   - Clean up temporary resources
-   - Monitor memory consumption
+2. Data Organization
+   - Structured notes with titles
+   - Clear source type categorization
+   - Entity relationship tracking
+   - Status management
 
 ## Contributing
 
