@@ -1658,6 +1658,371 @@ def get_memory_entity_info(
     except sqlite3.Error as e:
         raise ValueError(f"SQLite error: {str(e)}")
 
+@mcp.tool()
+def search_papers_by_entity_patterns(
+    patterns: List[Dict[str, Any]],
+    match_mode: str = 'all'  # 'all', 'any'
+) -> Dict[str, Any]:
+    """Search papers by complex entity relationship patterns.
+    
+    Args:
+        patterns: List of pattern dictionaries, each containing:
+                 {
+                     "entity": str,
+                     "relation_type": Optional[str],
+                     "context": Optional[str],
+                     "importance": Optional[int]  # minimum paper importance
+                 }
+        match_mode: How to match patterns ('all' or 'any')
+        
+    Returns:
+        Dictionary containing search results and matching papers
+    """
+    if not patterns:
+        raise ValueError("At least one pattern must be provided")
+    
+    if match_mode not in {'all', 'any'}:
+        raise ValueError("match_mode must be 'all' or 'any'")
+    
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Build dynamic query based on patterns
+            conditions = []
+            params = []
+            
+            for i, pattern in enumerate(patterns):
+                if 'entity' not in pattern:
+                    raise ValueError(f"Pattern {i} missing required 'entity' field")
+                    
+                table_alias = f'l{i}'
+                cond = f"""
+                    EXISTS (
+                        SELECT 1 
+                        FROM literature_entity_links {table_alias}
+                        WHERE {table_alias}.literature_id = r.literature_id
+                        AND {table_alias}.entity_name = ?
+                """
+                params.append(pattern['entity'])
+                
+                if pattern.get('relation_type'):
+                    if pattern['relation_type'] not in LiteratureIdentifier.VALID_ENTITY_RELATIONS:
+                        raise ValueError(f"Invalid relation_type in pattern {i}")
+                    cond += f" AND {table_alias}.relation_type = ?"
+                    params.append(pattern['relation_type'])
+                    
+                if pattern.get('context'):
+                    cond += f" AND {table_alias}.context LIKE ?"
+                    params.append(f"%{pattern['context']}%")
+                
+                if pattern.get('importance'):
+                    cond += f" AND r.importance >= ?"
+                    params.append(pattern['importance'])
+                
+                cond += ")"
+                conditions.append(cond)
+            
+            query = f"""
+                SELECT r.*, 
+                       GROUP_CONCAT(DISTINCT l.entity_name) as matched_entities,
+                       COUNT(DISTINCT l.entity_name) as entity_match_count,
+                       GROUP_CONCAT(DISTINCT l.relation_type) as relation_types,
+                       GROUP_CONCAT(DISTINCT l.context) as contexts
+                FROM reading_list r
+                JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                WHERE {' OR ' if match_mode == 'any' else ' AND '.join(conditions)}
+                GROUP BY r.literature_id
+                HAVING entity_match_count >= ?
+                ORDER BY r.importance DESC, entity_match_count DESC
+            """
+            params.append(1 if match_mode == 'any' else len(patterns))
+            
+            cursor.execute(query, params)
+            papers = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "patterns": patterns,
+                "match_mode": match_mode,
+                "total_matches": len(papers),
+                "match_distribution": {
+                    "by_importance": {str(i): len([p for p in papers if p['importance'] == i]) 
+                                    for i in range(1, 6)},
+                    "by_entity_count": {str(c): len([p for p in papers if p['entity_match_count'] == c]) 
+                                      for c in range(1, max([p['entity_match_count'] for p in papers] + [1]) + 1)}
+                },
+                "papers": papers
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def track_entity_evolution(
+    entity_name: str,
+    time_window: Optional[str] = None,  # e.g., "2020-2024"
+    include_details: bool = False
+) -> Dict[str, Any]:
+    """Track how an entity has evolved through papers over time.
+    
+    Args:
+        entity_name: Name of the entity to track
+        time_window: Optional time range in format "YYYY-YYYY"
+        include_details: If True, include detailed paper information
+        
+    Returns:
+        Dictionary containing evolution analysis and timeline
+    """
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            params = [entity_name]
+            time_condition = ""
+            
+            if time_window:
+                try:
+                    start_year, end_year = map(int, time_window.split('-'))
+                    time_condition = "AND CAST(strftime('%Y', r.added_date) as INTEGER) BETWEEN ? AND ?"
+                    params.extend([start_year, end_year])
+                except ValueError:
+                    raise ValueError("time_window must be in format 'YYYY-YYYY'")
+            
+            # Get timeline data
+            query = f"""
+                WITH PaperTimeline AS (
+                    SELECT 
+                        l.literature_id,
+                        l.relation_type,
+                        l.context,
+                        l.notes,
+                        r.added_date,
+                        r.importance,
+                        r.title,
+                        r.status
+                    FROM literature_entity_links l
+                    JOIN reading_list r ON l.literature_id = r.literature_id
+                    WHERE l.entity_name = ?
+                    {time_condition}
+                    ORDER BY r.added_date
+                )
+                SELECT 
+                    strftime('%Y', added_date) as year,
+                    COUNT(*) as paper_count,
+                    GROUP_CONCAT(DISTINCT relation_type) as relation_types,
+                    GROUP_CONCAT(DISTINCT context) as contexts,
+                    AVG(importance) as avg_importance,
+                    GROUP_CONCAT(DISTINCT status) as statuses
+                FROM PaperTimeline
+                GROUP BY year
+                ORDER BY year
+            """
+            
+            cursor.execute(query, params)
+            timeline = [dict(row) for row in cursor.fetchall()]
+            
+            # Get relationship transitions
+            cursor.execute("""
+                WITH OrderedPapers AS (
+                    SELECT 
+                        literature_id,
+                        relation_type,
+                        LAG(relation_type) OVER (ORDER BY added_date) as prev_relation,
+                        added_date
+                    FROM PaperTimeline
+                )
+                SELECT 
+                    prev_relation || ' -> ' || relation_type as transition,
+                    COUNT(*) as count,
+                    MIN(added_date) as first_occurrence,
+                    MAX(added_date) as last_occurrence
+                FROM OrderedPapers
+                WHERE prev_relation IS NOT NULL
+                GROUP BY transition
+                ORDER BY count DESC
+            """)
+            transitions = [dict(row) for row in cursor.fetchall()]
+            
+            # Get detailed paper information if requested
+            details = None
+            if include_details:
+                cursor.execute(f"""
+                    SELECT 
+                        r.literature_id,
+                        r.title,
+                        r.status,
+                        r.importance,
+                        r.added_date,
+                        l.relation_type,
+                        l.context,
+                        l.notes
+                    FROM reading_list r
+                    JOIN literature_entity_links l ON r.literature_id = l.literature_id
+                    WHERE l.entity_name = ?
+                    {time_condition}
+                    ORDER BY r.added_date
+                """, params)
+                details = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "entity": entity_name,
+                "time_window": time_window,
+                "timeline": timeline,
+                "transitions": transitions,
+                "total_papers": sum(t['paper_count'] for t in timeline),
+                "evolution_stats": {
+                    "relation_diversity": len(set(t['relation_types'].split(',') for t in timeline)),
+                    "context_diversity": len(set(t['contexts'].split(',') for t in timeline)),
+                    "avg_importance_trend": [float(t['avg_importance']) for t in timeline],
+                    "status_distribution": {status: sum(1 for t in timeline if status in t['statuses'].split(','))
+                                         for status in LiteratureIdentifier.VALID_STATUSES}
+                },
+                "paper_details": details if include_details else None
+            }
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
+@mcp.tool()
+def identify_research_gaps(
+    min_importance: int = 3,
+    min_papers: int = 2,
+    include_suggestions: bool = True
+) -> Dict[str, Any]:
+    """Identify potential research gaps and opportunities.
+    
+    Args:
+        min_importance: Minimum importance level for analysis
+        min_papers: Minimum number of papers for reliable analysis
+        include_suggestions: If True, include research suggestions
+        
+    Returns:
+        Dictionary containing gap analysis and suggestions
+    """
+    if min_importance < 1 or min_importance > 5:
+        raise ValueError("min_importance must be between 1 and 5")
+        
+    with SQLiteConnection(DB_PATH) as conn:
+        cursor = conn.cursor()
+        try:
+            # Find isolated entities (limited context coverage)
+            cursor.execute("""
+                WITH EntityContexts AS (
+                    SELECT 
+                        entity_name,
+                        COUNT(DISTINCT context) as context_count,
+                        COUNT(DISTINCT literature_id) as paper_count,
+                        GROUP_CONCAT(DISTINCT relation_type) as relation_types,
+                        GROUP_CONCAT(DISTINCT context) as contexts,
+                        AVG(r.importance) as avg_importance
+                    FROM literature_entity_links l
+                    JOIN reading_list r ON l.literature_id = r.literature_id
+                    WHERE r.importance >= ?
+                    GROUP BY entity_name
+                    HAVING paper_count >= ?
+                )
+                SELECT *
+                FROM EntityContexts
+                WHERE context_count = 1
+                ORDER BY paper_count DESC, avg_importance DESC
+            """, [min_importance, min_papers])
+            
+            isolated_entities = [dict(row) for row in cursor.fetchall()]
+            
+            # Find weak connections between entities
+            cursor.execute("""
+                WITH EntityPairs AS (
+                    SELECT 
+                        l1.entity_name as entity1,
+                        l2.entity_name as entity2,
+                        COUNT(DISTINCT l1.literature_id) as shared_papers,
+                        GROUP_CONCAT(DISTINCT l1.relation_type || '/' || l2.relation_type) as relation_pairs,
+                        AVG(r.importance) as avg_importance
+                    FROM literature_entity_links l1
+                    JOIN literature_entity_links l2 
+                        ON l1.literature_id = l2.literature_id
+                        AND l1.entity_name < l2.entity_name
+                    JOIN reading_list r ON l1.literature_id = r.literature_id
+                    WHERE r.importance >= ?
+                    GROUP BY l1.entity_name, l2.entity_name
+                    HAVING shared_papers >= ?
+                )
+                SELECT *
+                FROM EntityPairs
+                WHERE shared_papers <= 2
+                ORDER BY avg_importance DESC, shared_papers
+            """, [min_importance, min_papers])
+            
+            weak_connections = [dict(row) for row in cursor.fetchall()]
+            
+            # Find unexplored sections
+            cursor.execute("""
+                WITH PaperSections AS (
+                    SELECT 
+                        l.entity_name,
+                        l.context,
+                        COUNT(DISTINCT l.literature_id) as papers_in_section
+                    FROM literature_entity_links l
+                    JOIN reading_list r ON l.literature_id = r.literature_id
+                    WHERE r.importance >= ?
+                    AND l.context IN (
+                        'abstract', 'introduction', 'background', 'methods',
+                        'results', 'discussion', 'conclusion'
+                    )
+                    GROUP BY l.entity_name, l.context
+                )
+                SELECT 
+                    entity_name,
+                    GROUP_CONCAT(context) as covered_sections,
+                    COUNT(DISTINCT context) as section_coverage
+                FROM PaperSections
+                GROUP BY entity_name
+                HAVING section_coverage < 4
+                ORDER BY section_coverage
+            """, [min_importance])
+            
+            section_gaps = [dict(row) for row in cursor.fetchall()]
+            
+            result = {
+                "isolated_entities": isolated_entities,
+                "weak_connections": weak_connections,
+                "section_gaps": section_gaps,
+                "analysis_params": {
+                    "min_importance": min_importance,
+                    "min_papers": min_papers
+                },
+                "statistics": {
+                    "total_gaps": len(isolated_entities) + len(weak_connections) + len(section_gaps),
+                    "by_type": {
+                        "isolated_entities": len(isolated_entities),
+                        "weak_connections": len(weak_connections),
+                        "section_gaps": len(section_gaps)
+                    }
+                }
+            }
+            
+            if include_suggestions:
+                result["research_suggestions"] = [
+                    {
+                        "type": "context_expansion",
+                        "entities": [e['entity_name'] for e in isolated_entities[:5]],
+                        "suggestion": "Consider exploring these entities in different contexts"
+                    },
+                    {
+                        "type": "relationship_investigation",
+                        "entity_pairs": [(w['entity1'], w['entity2']) for w in weak_connections[:5]],
+                        "suggestion": "Investigate potential relationships between these entity pairs"
+                    },
+                    {
+                        "type": "section_coverage",
+                        "entities": [s['entity_name'] for s in section_gaps[:5]],
+                        "suggestion": "Expand coverage of these entities across different paper sections"
+                    }
+                ]
+            
+            return result
+            
+        except sqlite3.Error as e:
+            raise ValueError(f"SQLite error: {str(e)}")
+
 if __name__ == "__main__":
     # Start the FastMCP server
     mcp.run()
