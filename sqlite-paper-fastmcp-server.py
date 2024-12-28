@@ -2,6 +2,7 @@ from pathlib import Path
 import sqlite3
 import os
 import json
+import uuid
 from typing import List, Dict, Any, Optional, Tuple, Set
 from fastmcp import FastMCP
 from datetime import datetime
@@ -137,6 +138,81 @@ def search_source(
             
         return None, potential_matches
 
+def bulk_search_sources(
+    sources: List[Tuple[str, str, str, str]],  # List of (title, type, identifier_type, identifier_value)
+    db_path: Path
+) -> List[Tuple[Optional[str], List[Dict]]]:
+    """
+    Bulk search for multiple sources simultaneously while maintaining consistent return format.
+    
+    Args:
+        sources: List of tuples, each containing:
+            - title: Source title
+            - type: Source type
+            - identifier_type: Type of identifier
+            - identifier_value: Value of the identifier
+        db_path: Path to SQLite database
+    
+    Returns:
+        List of tuples, each containing:
+        - UUID of exact match if found by identifier (else None)
+        - List of potential matches by title/type (empty if exact match found)
+    """
+    results = []
+    
+    with SQLiteConnection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Process each source maintaining the same logic and return structure
+        for title, type_, identifier_type, identifier_value in sources:
+            # Validate inputs (just like in original)
+            if type_ not in SourceTypes.VALID_TYPES:
+                raise ValueError(f"Invalid source type. Must be one of: {SourceTypes.VALID_TYPES}")
+            if identifier_type not in SourceIdentifiers.VALID_TYPES:
+                raise ValueError(f"Invalid identifier type. Must be one of: {SourceIdentifiers.VALID_TYPES}")
+            
+            # First try exact identifier match
+            cursor.execute("""
+                SELECT id FROM sources
+                WHERE type = ? AND 
+                      json_extract(identifiers, ?) = ?
+            """, [
+                type_,
+                f"$.{identifier_type}",
+                identifier_value
+            ])
+            
+            result = cursor.fetchone()
+            if result:
+                # If exact match found, append (uuid, empty list)
+                results.append((result['id'], []))
+                continue
+                
+            # If no exact match, try fuzzy title match
+            cursor.execute("""
+                SELECT id, title, identifiers
+                FROM sources
+                WHERE type = ? AND 
+                      LOWER(title) LIKE ?
+            """, [
+                type_,
+                f"%{title.lower()}%"
+            ])
+            
+            potential_matches = [
+                {
+                    'id': row['id'],
+                    'title': row['title'],
+                    'identifiers': json.loads(row['identifiers'])
+                }
+                for row in cursor.fetchall()
+            ]
+            
+            # Append (None, potential_matches)
+            results.append((None, potential_matches))
+    
+    return results
+
 def get_source_details(uuid: str, db_path: Path) -> Dict:
     """
     Get complete information about a source by UUID.
@@ -210,6 +286,10 @@ def get_source_details(uuid: str, db_path: Path) -> Dict:
         ]
         
         return source_data
+
+
+
+
 
 # Original tools for completeness for sqlite
 @mcp.tool()
@@ -475,6 +555,8 @@ def vacuum_database() -> Dict[str, Any]:
 
 
 
+
+
 # Public tools
 
 @mcp.tool()
@@ -500,13 +582,21 @@ def add_source(
     if not DB_PATH.exists():
         raise FileNotFoundError(f"Database not found at: {DB_PATH}")
         
+    # Validate source type
+    if type not in SourceTypes.VALID_TYPES:
+        raise ValueError(f"Invalid source type. Must be one of: {SourceTypes.VALID_TYPES}")
+        
+    # Validate identifier type
+    if identifier_type not in SourceIdentifiers.VALID_TYPES:
+        raise ValueError(f"Invalid identifier type. Must be one of: {SourceIdentifiers.VALID_TYPES}")
+        
     # Search for existing source
-    uuid, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
-    if uuid:
+    uuid_str, potential_matches = search_source(title, type, identifier_type, identifier_value, DB_PATH)
+    if uuid_str:
         return {
             "status": "error",
             "message": "Source already exists",
-            "existing_source": get_source_details(uuid, DB_PATH)
+            "existing_source": get_source_details(uuid_str, DB_PATH)
         }
     
     if potential_matches:
