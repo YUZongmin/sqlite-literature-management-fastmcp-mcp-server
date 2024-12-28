@@ -3,7 +3,7 @@ import sqlite3
 import os
 import json
 import uuid
-from typing import List, Dict, Any, Optional, Tuple, Set
+from typing import List, Dict, Any, Optional, Tuple, Set, Union
 from fastmcp import FastMCP
 from datetime import datetime
 import re
@@ -140,12 +140,12 @@ def search_sources(
     
     return results
 
-def get_sources_details(uuids: List[str], db_path: Path) -> List[Dict[str, Any]]:
+def get_sources_details(uuids: Union[str, List[str]], db_path: Path) -> List[Dict[str, Any]]:
     """
     Get complete information about multiple sources by their UUIDs.
     
     Args:
-        uuids: List of source UUIDs
+        uuids: Single UUID string or list of source UUIDs
         db_path: Path to SQLite database
         
     Returns:
@@ -157,6 +157,10 @@ def get_sources_details(uuids: List[str], db_path: Path) -> List[Dict[str, Any]]
     Raises:
         ValueError: If any source UUID is not found
     """
+    # Handle single UUID case
+    if isinstance(uuids, str):
+        uuids = [uuids]
+        
     if not uuids:
         return []
     
@@ -551,12 +555,19 @@ def add_sources(
     
     for (title, type_, id_type, id_value, initial_note), (uuid_str, matches) in zip(sources, search_results):
         if uuid_str:
-            # Source already exists
-            results.append({
-                "status": "error",
-                "message": "Source already exists",
-                "existing_source": get_sources_details(uuid_str, DB_PATH)
-            })
+            # Source already exists - get its details
+            try:
+                existing_source = get_sources_details(uuid_str, DB_PATH)[0]
+                results.append({
+                    "status": "error",
+                    "message": "Source already exists",
+                    "existing_source": existing_source
+                })
+            except Exception as e:
+                results.append({
+                    "status": "error",
+                    "message": f"Error retrieving existing source: {str(e)}"
+                })
             continue
             
         if matches:
@@ -681,8 +692,8 @@ def add_notes(
     notes_to_add = []
     source_ids = []
     
-    for (title, type_, id_type, id_value, note_title, note_content), (uuid, matches) in zip(source_notes, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value, note_title, note_content), (uuid_str, matches) in zip(source_notes, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -697,14 +708,14 @@ def add_notes(
             continue
         
         notes_to_add.append({
-            'source_id': uuid,
+            'source_id': uuid_str,
             'note_title': note_title,
             'content': note_content
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if notes_to_add:
@@ -814,8 +825,8 @@ def update_status(
     updates_to_make = []
     source_ids = []
     
-    for (title, type_, id_type, id_value, new_status), (uuid, matches) in zip(source_status, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value, new_status), (uuid_str, matches) in zip(source_status, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -830,13 +841,13 @@ def update_status(
             continue
         
         updates_to_make.append({
-            'id': uuid,
+            'id': uuid_str,
             'status': new_status
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if updates_to_make:
@@ -853,7 +864,7 @@ def update_status(
                 conn.commit()
                 
                 # Get updated source details
-                source_details = get_sources_details(source_ids, DB_PATH)
+                source_details = get_sources_details(list(set(source_ids)), DB_PATH)
                 
                 # Update results
                 for i, result in enumerate(results):
@@ -931,14 +942,14 @@ def add_identifiers(
     
     # Create mapping of new identifiers to existing sources
     existing_new_ids = {
-        (type_, id_type, id_value): uuid
-        for (_, type_, _, _, id_type, id_value), (uuid, _) 
+        (type_, id_type, id_value): uuid_str
+        for (_, type_, _, _, id_type, id_value), (uuid_str, _) 
         in zip(source_identifiers, new_id_search_results)
-        if uuid
+        if uuid_str
     }
     
-    for (title, type_, current_type, current_value, new_type, new_value), (uuid, matches) in zip(source_identifiers, search_results):
-        if not uuid:
+    for (title, type_, current_type, current_value, new_type, new_value), (uuid_str, matches) in zip(source_identifiers, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -954,23 +965,30 @@ def add_identifiers(
         
         # Check if new identifier exists on a different source
         existing_source = existing_new_ids.get((type_, new_type, new_value))
-        if existing_source and existing_source != uuid:
-            results.append({
-                "status": "error",
-                "message": "New identifier already exists on a different source",
-                "existing_source": get_sources_details(existing_source, DB_PATH)
-            })
+        if existing_source and existing_source != uuid_str:
+            try:
+                existing_details = get_sources_details(existing_source, DB_PATH)[0]
+                results.append({
+                    "status": "error",
+                    "message": "New identifier already exists on a different source",
+                    "existing_source": existing_details
+                })
+            except Exception as e:
+                results.append({
+                    "status": "error",
+                    "message": f"Error retrieving existing source: {str(e)}"
+                })
             continue
         
         updates_to_make.append({
-            'id': uuid,
+            'id': uuid_str,
             'new_type': new_type,
             'new_value': new_value
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if updates_to_make:
@@ -996,7 +1014,7 @@ def add_identifiers(
                 conn.commit()
                 
                 # Get updated source details
-                source_details = get_sources_details(source_ids, DB_PATH)
+                source_details = get_sources_details(list(set(source_ids)), DB_PATH)
                 
                 # Update results
                 for i, result in enumerate(results):
@@ -1069,8 +1087,8 @@ def link_to_entities(
     links_to_add = []
     source_ids = []
     
-    for (title, type_, id_type, id_value, entity_name, relation_type, notes), (uuid, matches) in zip(source_entity_links, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value, entity_name, relation_type, notes), (uuid_str, matches) in zip(source_entity_links, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -1085,15 +1103,15 @@ def link_to_entities(
             continue
         
         links_to_add.append({
-            'source_id': uuid,
+            'source_id': uuid_str,
             'entity_name': entity_name,
             'relation_type': relation_type,
             'notes': notes
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if links_to_add:
@@ -1192,8 +1210,8 @@ def get_source_entities(
     results = []
     source_ids = []
     
-    for (title, type_, id_type, id_value), (uuid, matches) in zip(sources, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value), (uuid_str, matches) in zip(sources, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -1207,10 +1225,10 @@ def get_source_entities(
                 })
             continue
         
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if source_ids:
@@ -1293,8 +1311,8 @@ def update_entity_links(
     updates_to_make = []
     source_ids = []
     
-    for (title, type_, id_type, id_value, entity_name, relation_type, notes), (uuid, matches) in zip(source_entity_updates, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value, entity_name, relation_type, notes), (uuid_str, matches) in zip(source_entity_updates, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -1309,15 +1327,15 @@ def update_entity_links(
             continue
         
         updates_to_make.append({
-            'source_id': uuid,
+            'source_id': uuid_str,
             'entity_name': entity_name,
             'relation_type': relation_type,
             'notes': notes
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if updates_to_make:
@@ -1419,8 +1437,8 @@ def remove_entity_links(
     links_to_remove = []
     source_ids = []
     
-    for (title, type_, id_type, id_value, entity_name), (uuid, matches) in zip(source_entity_pairs, search_results):
-        if not uuid:
+    for (title, type_, id_type, id_value, entity_name), (uuid_str, matches) in zip(source_entity_pairs, search_results):
+        if not uuid_str:
             if matches:
                 results.append({
                     "status": "error",
@@ -1435,13 +1453,13 @@ def remove_entity_links(
             continue
         
         links_to_remove.append({
-            'source_id': uuid,
+            'source_id': uuid_str,
             'entity_name': entity_name
         })
-        source_ids.append(uuid)
+        source_ids.append(uuid_str)
         results.append({
             "status": "pending",
-            "source_id": uuid
+            "source_id": uuid_str
         })
     
     if links_to_remove:
