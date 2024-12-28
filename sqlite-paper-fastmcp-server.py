@@ -549,13 +549,13 @@ def add_sources(
     sources_to_add = []
     notes_to_add = []
     
-    for (title, type_, id_type, id_value, initial_note), (uuid, matches) in zip(sources, search_results):
-        if uuid:
+    for (title, type_, id_type, id_value, initial_note), (uuid_str, matches) in zip(sources, search_results):
+        if uuid_str:
             # Source already exists
             results.append({
                 "status": "error",
                 "message": "Source already exists",
-                "existing_source": get_sources_details(uuid, DB_PATH)
+                "existing_source": get_sources_details(uuid_str, DB_PATH)
             })
             continue
             
@@ -568,8 +568,8 @@ def add_sources(
             })
             continue
         
-        # New source to add
-        new_id = str(uuid.uuid4())
+        # New source to add - using UUID module explicitly
+        new_id = str(uuid.uuid4())  # Generate new UUID using the imported module
         identifiers = {id_type: id_value}
         
         sources_to_add.append({
