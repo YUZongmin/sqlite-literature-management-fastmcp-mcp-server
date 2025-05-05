@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/yuzongmin-sqlite-literature-management-fastmcp-mcp-server-badge.png)](https://mseep.ai/app/yuzongmin-sqlite-literature-management-fastmcp-mcp-server)
+
 # Universal Source Management System
 
 A flexible system for managing various types of sources (papers, books, webpages, etc.) and integrating them with knowledge graphs.
